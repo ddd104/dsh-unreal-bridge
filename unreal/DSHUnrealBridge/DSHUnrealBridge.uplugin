@@ -1,0 +1,11 @@
+{
+  "FileVersion": 3,
+  "Version": 3,
+  "VersionName": "0.1.2",
+  "FriendlyName": "DSH Unreal Bridge",
+  "Description": "Authenticated local DeepSeek Harness bridge with blueprint previews and revision checks.",
+  "Category": "Editor",
+  "CanContainContent": false,
+  "EnabledByDefault": true,
+  "Modules": [{"Name":"DSHUnrealBridge","Type":"Editor","LoadingPhase":"PostEngineInit"}]
+}

@@ -1,0 +1,8 @@
+- insert:
+    - id: dsh-unreal-bridge
+      name: dsh-unreal-bridge
+      config:
+        port: 17891
+        allowWrites: true
+        requireApproval: true
+        requestTimeoutMs: 30000

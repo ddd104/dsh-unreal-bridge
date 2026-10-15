@@ -1,0 +1,63 @@
+{
+  "name": "dsh-unreal-bridge",
+  "version": "0.1.2",
+  "description": "DeepSeek Harness and Unreal Editor session bridge",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ddd104/dsh-unreal-bridge.git"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./remote": "./lib/remote.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.0-rc.2": "compatible"
+      }
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "npm run build && npm test"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "docs",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "dependencies": {
+    "ws": "8.18.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-test-renderer": "18.3.1"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

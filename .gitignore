@@ -1,0 +1,15 @@
+node_modules/
+*.tgz
+unreal/**/Binaries/
+unreal/**/Intermediate/
+.test-state/
+.env
+.env.*
+!.env.example
+*.log
+*.pdb
+bridge.json
+audit*.jsonl
+.vs/
+unreal/**/Saved/
+unreal/**/DerivedDataCache/

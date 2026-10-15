@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.png binary
+*.dll binary
+*.zip binary
+*.tgz binary
+# Generated bundles preserve third-party template-string indentation.
+lib/*.js linguist-generated=true whitespace=-blank-at-eol
+lib/*.map linguist-generated=true
