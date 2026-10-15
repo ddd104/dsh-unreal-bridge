@@ -7,13 +7,6 @@ if errorlevel 1 (
 )
 
 if not "%~2"=="" goto :usage
-if not defined DSH_CLI set "DSH_CLI=%LOCALAPPDATA%\Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd"
-if not exist "%DSH_CLI%" (
-    echo DSH CLI was not found: "%DSH_CLI%"
-    echo Set DSH_CLI to the full path of dsh.cmd if DSH is installed elsewhere.
-    goto :fail
-)
-
 where node.exe >nul 2>&1
 if errorlevel 1 (
     echo Node.js 22 or newer is required.
@@ -39,12 +32,12 @@ call npm pack --pack-destination ..
 if errorlevel 1 goto :fail
 
 if "%~1"=="" goto :dsh_only
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" -DshCli "%DSH_CLI%" -Project "%~f1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" -Project "%~f1"
 if errorlevel 1 goto :fail
 goto :success
 
 :dsh_only
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1" -DshCli "%DSH_CLI%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install.ps1"
 if errorlevel 1 goto :fail
 
 :success

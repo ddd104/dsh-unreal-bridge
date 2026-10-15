@@ -14,7 +14,7 @@ Git 仓库包含 DSH 与 UE 插件源码。UE DLL 由目标引擎编译；知识
 install-dsh.bat "D:\UnrealProjects\MyGame\MyGame.uproject"
 ```
 
-批处理需要 Node.js 22+、npm 和已安装的 DSH；若 DSH 安装在其他位置，可将环境变量 `DSH_CLI` 设为 `dsh.cmd` 的完整路径。安装 UE 插件时，准备脚本会下载并校验固定版本的 Node.js 24.15.0，构建知识工具；运行期不依赖系统 Node。Git 仓库不包含 UE 预编译 DLL，UE 插件需要使用目标工程对应的 Unreal Engine 编译。安装完成后完整退出并重新打开 DSH。
+批处理需要 Node.js 22+、npm 和已安装的 DSH；安装程序会从命令路径与 Windows 安装记录中查找 DSH CLI。若自动查找失败，可按提示输入 DSH 安装目录或 `dsh.cmd` 的完整路径，也可预先设置环境变量 `DSH_CLI`。安装 UE 插件时，准备脚本会下载并校验固定版本的 Node.js 24.15.0，构建知识工具；运行期不依赖系统 Node。Git 仓库不包含 UE 预编译 DLL，UE 插件需要使用目标工程对应的 Unreal Engine 编译。安装完成后完整退出并重新打开 DSH。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5Project\EHV\EHV.uproject'

@@ -2,11 +2,12 @@
 param(
     [string]$Project,
     [ValidatePattern('^[A-Za-z0-9_-]+$')][string]$Profile = 'desktop',
-    [string]$DshCli = (Join-Path $env:LOCALAPPDATA 'Programs\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'),
+    [string]$DshCli = $env:DSH_CLI,
     [string]$Archive
 )
 $ErrorActionPreference = 'Stop'
 $packageRoot = Split-Path -Parent $PSScriptRoot
+$DshCli = & (Join-Path $PSScriptRoot 'resolve-dsh-cli.ps1') -DshCli $DshCli
 if (-not $Archive) {
     $release = (Get-Content -LiteralPath (Join-Path $packageRoot 'package.json') -Raw | ConvertFrom-Json).version
     $Archive = Join-Path (Split-Path -Parent $packageRoot) ("dsh-unreal-bridge-$release.tgz")
