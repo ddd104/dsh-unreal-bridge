@@ -3,8 +3,15 @@ import {TYPERT_REMOTE} from './remote.mjs';
 
 const h=React.createElement;
 const colors={
-  panel:'#232730',surface:'#1c2028',border:'#363d49',text:'#f1f3f7',muted:'#a6afbd',
-  accent:'#80aaff',online:'#55c995',warning:'#e5b56a',error:'#f18d91'
+  panel:'var(--dsw-alias-bg-layer-1, #fff)',
+  surface:'var(--dsw-alias-bg-layer-2, #fff)',
+  border:'var(--dsw-alias-border-l2, rgba(0,0,0,.1))',
+  text:'var(--dsw-alias-label-primary, #17191d)',
+  muted:'var(--dsw-alias-label-secondary, #62666d)',
+  accent:'var(--dsw-alias-brand-primary, #17191d)',
+  online:'var(--dsw-alias-state-success-primary, #15803d)',
+  warning:'var(--dsw-alias-state-warn-label, #a16207)',
+  error:'var(--dsw-alias-state-error-primary, #b91c1c)'
 };
 const assetName=path=>path.split('/').pop()?.split('.')[0]||path;
 
@@ -46,11 +53,11 @@ export function UnrealDock({read,bind}) {
 
   return h('section',{
     'aria-label':'Unreal Editor 工作区',
-    style:{boxSizing:'border-box',width:'calc(100% - 16px)',maxWidth:712,margin:'0 auto 8px',padding:'10px 14px',border:`1px solid ${colors.border}`,borderRadius:12,backgroundColor:colors.panel,color:colors.text,boxShadow:'0 6px 20px rgba(0,0,0,.18)',fontSize:12}
+    style:{boxSizing:'border-box',width:'calc(100% - 16px)',maxWidth:712,margin:'0 auto 8px',padding:'10px 14px',border:`1px solid ${colors.border}`,borderRadius:12,backgroundColor:colors.panel,color:colors.text,boxShadow:'var(--dsw-elevation-panel, 0 2px 8px rgba(0,0,0,.08))',fontSize:12}
   },
     h('div',{style:{display:'flex',alignItems:'center',flexWrap:'wrap',columnGap:12,rowGap:8}},
       h('div',{style:{display:'flex',alignItems:'center',gap:8,flex:'0 0 auto',fontWeight:600,fontSize:13,whiteSpace:'nowrap'}},
-        h('span',{'aria-hidden':true,style:{display:'inline-block',width:8,height:8,borderRadius:2,backgroundColor:colors.accent,boxShadow:'0 0 0 3px rgba(128,170,255,.13)'}}),
+        h('span',{'aria-hidden':true,style:{display:'inline-block',width:8,height:8,borderRadius:2,backgroundColor:colors.accent,boxShadow:'0 0 0 3px var(--dsw-alias-border-l1, rgba(0,0,0,.04))'}}),
         'Unreal Editor'),
       h('select',{
         'aria-label':'选择编辑器实例',disabled:busy||!state,value:state?.editorId??'',onChange:select,

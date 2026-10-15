@@ -8,8 +8,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $packageRoot = Split-Path -Parent $PSScriptRoot
 $DshCli = & (Join-Path $PSScriptRoot 'resolve-dsh-cli.ps1') -DshCli $DshCli
+$release = (Get-Content -LiteralPath (Join-Path $packageRoot 'package.json') -Raw | ConvertFrom-Json).version
 if (-not $Archive) {
-    $release = (Get-Content -LiteralPath (Join-Path $packageRoot 'package.json') -Raw | ConvertFrom-Json).version
     $Archive = Join-Path (Split-Path -Parent $packageRoot) ("dsh-unreal-bridge-$release.tgz")
 }
 if ($Project) {
@@ -36,7 +36,12 @@ foreach ($name in @('package.json','pnpm-lock.yaml','cordis.patch.yml','pnpm-wor
     $file = Join-Path $profileRoot $name
     if (Test-Path -LiteralPath $file) { Copy-Item -LiteralPath $file -Destination (Join-Path $backup $name) }
 }
-& $DshCli plugin --profile $Profile add ("file:" + (Resolve-Path -LiteralPath $Archive).Path) --ignore-scripts
+$archiveHash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.Substring(0, 16).ToLowerInvariant()
+$archiveStore = Join-Path $profileRoot '.plugin-manager\dsh-unreal-bridge-archives'
+New-Item -ItemType Directory -Path $archiveStore -Force | Out-Null
+$stagedArchive = Join-Path $archiveStore ("dsh-unreal-bridge-$release-$archiveHash.tgz")
+Copy-Item -LiteralPath $Archive -Destination $stagedArchive -Force
+& $DshCli plugin --profile $Profile add ("file:" + $stagedArchive) --ignore-scripts
 if ($LASTEXITCODE -ne 0) { throw "DSH installation failed. Config backup: $backup" }
 Write-Output "Installed DSH profile: $Profile"
 Write-Output "DSH config backup: $backup"

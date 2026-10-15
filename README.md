@@ -1,4 +1,4 @@
-# DSH Unreal Bridge 0.2.0
+# DSH Unreal Bridge 0.2.1
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
