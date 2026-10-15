@@ -1,5 +1,6 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
+#include "IDSHUnrealBridgeMCPModule.h"
 #include "AssetRegistry/AssetData.h"
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
@@ -76,6 +77,7 @@ private:
     TQueue<FIncoming,EQueueMode::Mpsc> Inbox;
     TMap<FString,TSharedPtr<FJsonObject>> Results;
     TMap<FString,FString> RequestHashes;
+    TSet<FString> PendingMcp;
     TArray<FString> ResultOrder;
     TMap<TWeakObjectPtr<UBlueprint>,FString> Watched;
     TSet<TWeakObjectPtr<UBlueprint>> Dirty;
@@ -109,11 +111,25 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message)
     {
         auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("response"));O->SetStringField(TEXT("id"),Id);O->SetBoolField(TEXT("ok"),false);auto E=MakeShared<FJsonObject>();E->SetStringField(TEXT("code"),Code);E->SetStringField(TEXT("message"),Message);O->SetObjectField(TEXT("error"),E);return O;
+    }
+    void CompleteMcp(const FString& Id,const TSharedPtr<FJsonObject>& Result,const FString& Code,const FString& Message,bool bWrite)
+    {
+        if(!PendingMcp.Contains(Id))return;
+        PendingMcp.Remove(Id);
+        TSharedPtr<FJsonObject> Response;
+        if(Result)
+        {
+            Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);
+        }
+        else Response=Error(Id,Code,Message);
+        if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("MCP result exceeds the 2 MiB bridge limit"));
+        if(bWrite){Results.Add(Id,Response);ResultOrder.Add(Id);if(ResultOrder.Num()>1024){Results.Remove(ResultOrder[0]);ResultOrder.RemoveAt(0);}}
+        Send(Response);
     }
     void Request(const TSharedPtr<FJsonObject>& Message)
     {
@@ -122,15 +138,49 @@ private:
         const auto Params=*ParamsPtr;
         if(Method==TEXT("request_status"))
         {
-            const FString QueryId=Field(Params,TEXT("requestId"));auto R=MakeShared<FJsonObject>();auto Result=MakeShared<FJsonObject>();Result->SetStringField(TEXT("status"),Results.Contains(QueryId)?TEXT("completed"):RequestHashes.Contains(QueryId)?TEXT("expired"):TEXT("unknown"));if(Results.Contains(QueryId))Result->SetObjectField(TEXT("response"),Results[QueryId]);R->SetStringField(TEXT("type"),TEXT("response"));R->SetStringField(TEXT("id"),Id);R->SetBoolField(TEXT("ok"),true);R->SetObjectField(TEXT("result"),Result);Send(R);return;
+            const FString QueryId=Field(Params,TEXT("requestId"));auto R=MakeShared<FJsonObject>();auto Result=MakeShared<FJsonObject>();Result->SetStringField(TEXT("status"),Results.Contains(QueryId)?TEXT("completed"):PendingMcp.Contains(QueryId)?TEXT("pending"):RequestHashes.Contains(QueryId)?TEXT("expired"):TEXT("unknown"));if(Results.Contains(QueryId))Result->SetObjectField(TEXT("response"),Results[QueryId]);R->SetStringField(TEXT("type"),TEXT("response"));R->SetStringField(TEXT("id"),Id);R->SetBoolField(TEXT("ok"),true);R->SetObjectField(TEXT("result"),Result);Send(R);return;
         }
-        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save");
+        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool");
         if(bWrite)
         {
             const FTCHARToUTF8 Bytes(*(Method+Encode(Params)));const FString Hash=FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
-            if(const FString* Previous=RequestHashes.Find(Id)){if(*Previous!=Hash)Send(Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters")));else if(Results.Contains(Id))Send(Results[Id]);else Send(Error(Id,TEXT("RESULT_EXPIRED"),TEXT("This write already ran; cached result expired, do not repeat")));return;}
+            if(const FString* Previous=RequestHashes.Find(Id)){if(*Previous!=Hash)Send(Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters")));else if(Results.Contains(Id))Send(Results[Id]);else if(PendingMcp.Contains(Id))Send(Error(Id,TEXT("IN_PROGRESS"),TEXT("This MCP tool call is still running; query request status")));else Send(Error(Id,TEXT("RESULT_EXPIRED"),TEXT("This write already ran; cached result expired, do not repeat")));return;}
             if(RequestHashes.Num()>=10000){Send(Error(Id,TEXT("REQUEST_LIMIT"),TEXT("Write request journal is full; restart the editor after reconciling pending requests")));return;}
             RequestHashes.Add(Id,Hash);
+        }
+        if(Method==TEXT("mcp_list_tools"))
+        {
+            FString MCPError;auto Result=IDSHUnrealBridgeMCPModule::Get().ListTools(MCPError);
+            auto Response=Result?MakeShared<FJsonObject>():Error(Id,TEXT("MCP_UNAVAILABLE"),MCPError);
+            if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
+            if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("MCP tool list exceeds the 2 MiB bridge limit"));
+            Send(Response);return;
+        }
+        if(Method==TEXT("mcp_discover")||Method==TEXT("mcp_call_tool"))
+        {
+            const FString Name=Field(Params,TEXT("name"));
+            if(Method==TEXT("mcp_discover")&&Name!=TEXT("list_toolsets")&&Name!=TEXT("describe_toolset")){auto Response=Error(Id,TEXT("INVALID_REQUEST"),TEXT("Only MCP toolset discovery is allowed without write approval"));Send(Response);return;}
+            const TSharedPtr<FJsonObject>* ArgumentsPtr=nullptr;
+            if(Name.IsEmpty()||!Params->TryGetObjectField(TEXT("arguments"),ArgumentsPtr)||!ArgumentsPtr||!ArgumentsPtr->IsValid())
+            {
+                auto Response=Error(Id,TEXT("INVALID_REQUEST"),TEXT("MCP tool name and arguments object are required"));
+                if(bWrite){Results.Add(Id,Response);ResultOrder.Add(Id);if(ResultOrder.Num()>1024){Results.Remove(ResultOrder[0]);ResultOrder.RemoveAt(0);}}
+                Send(Response);return;
+            }
+            PendingMcp.Add(Id);
+            const TWeakPtr<FDSHConnection> Weak=AsShared();
+            FString MCPError;
+            const bool bStarted=IDSHUnrealBridgeMCPModule::Get().CallTool(Name,*ArgumentsPtr,Id,
+                [Weak,Id,bWrite](TSharedPtr<FJsonObject> Result)
+                {
+                    auto Finish=[Weak,Id,bWrite,Result]()
+                    {
+                        if(auto Self=Weak.Pin())Self->CompleteMcp(Id,Result,TEXT("MCP_TOOL_ERROR"),TEXT("MCP tool returned no result"),bWrite);
+                    };
+                    if(IsInGameThread())Finish();else AsyncTask(ENamedThreads::GameThread,MoveTemp(Finish));
+                },MCPError);
+            if(!bStarted)CompleteMcp(Id,nullptr,TEXT("MCP_UNAVAILABLE"),MCPError,bWrite);
+            return;
         }
         FString Code,MessageText;auto Result=Operations.Execute(Method,Params,Code,MessageText);TSharedPtr<FJsonObject> Response;
         if(Result){Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}

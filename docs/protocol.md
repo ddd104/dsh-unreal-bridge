@@ -9,6 +9,11 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_state` | `{}`，获取在线编辑器、当前绑定、选区和未知写入状态 |
 | `unreal_bind` | `editorId` 字符串或 null，仅改变当前对话绑定 |
 | `unreal_catalog` | 可选 `query`、`limit`，查询函数路径和精确引脚名 |
+| `unreal_mcp_tools` | `{}`，列出当前 UE 实例注册的顶层 MCP 工具与参数 schema |
+| `unreal_mcp_toolsets` | `{}`，列出当前 UE 实例中的工具集 |
+| `unreal_mcp_describe` | `toolsetName`，查询工具集内函数、用途与精确参数 schema |
+| `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`，默认直接调用工具集函数 |
+| `unreal_mcp_call` | `name`、`arguments`、UUID `requestId`，默认直接调用顶层 MCP 工具 |
 | `unreal_read_blueprint` | `assetPath`，可选 `graph`、`nodeIds`、`detail: summary/full` |
 | `unreal_preview_create` | `assetPath`、`parent: Actor/ActorComponent/Object` |
 | `unreal_preview_patch` | `assetPath`、`graph`、`baseRevision`、`operations` |
@@ -18,6 +23,8 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_save` | `assetPath`、`baseRevision`、UUID `requestId` |
 
 每个工具需要所属 DSH 对话；其他对话不能使用本对话的 previewId。预览五分钟有效；绑定不同实例、断线或蓝图变化会阻止使用旧预览。资产路径使用 `/Game/Folder/BP_Name` 或对应对象路径，不能使用磁盘 `.uasset` 路径。
+
+资产增删改查优先走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 仍会拒绝调用。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用蓝图补丁的预览与版本机制。
 
 补丁示例（现有节点编号与引脚名必须先读取）：
 

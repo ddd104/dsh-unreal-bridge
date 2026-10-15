@@ -5,7 +5,7 @@ import { mkdir, writeFile, readFile, unlink, appendFile, rename, stat } from 'no
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
-import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, catalogSchema, fail, BridgeError } from './protocol.mjs';
+import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, catalogSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, fail, BridgeError } from './protocol.mjs';
 
 export function defaultStateDir() {
   return process.platform==='win32' ? join(process.env.LOCALAPPDATA ?? join(homedir(),'AppData','Local'),'DSHUnrealBridge') : join(process.env.XDG_STATE_HOME ?? join(homedir(),'.local','state'),'dsh-unreal-bridge');
@@ -83,6 +83,7 @@ export class UnrealBridge extends EventEmitter {
   state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:e?.selection??[],allowWrites:this.config.allowWrites,uncertain:this.uncertain.get(sessionId)??null};}
   bind(sessionId,editorId){if(editorId!==null&&!this.editors.has(editorId))fail('INSTANCE_NOT_FOUND','Editor is not connected'); if(this.inflight.has(sessionId))fail('BUSY','A request is still executing for this conversation');editorId===null?this.sessions.delete(sessionId):this.sessions.set(sessionId,editorId);this.changed();return this.state(sessionId);}
   target(sessionId){const editorId=this.sessions.get(sessionId);if(!editorId)fail('NOT_BOUND','Select an Unreal Editor instance for this conversation first');const editor=this.editors.get(editorId);if(!editor)fail('DISCONNECTED','The bound editor is offline; reconnect it or choose another instance');return editor;}
+  mcpTarget(sessionId){const editor=this.target(sessionId);if(!editor.capabilities.includes('mcp_tools'))fail('MCP_UNAVAILABLE','This editor does not expose UE MCP tools; enable ModelContextProtocol and update DSHUnrealBridge');return editor;}
   async request(editor,method,params={},options={}) {
     if(editor.ws.readyState!==WebSocket.OPEN)fail('DISCONNECTED','Editor is offline');
     const id=options.id??randomUUID(); if(this.pending.has(id))fail('DUPLICATE_REQUEST','Request is already pending');
@@ -98,6 +99,11 @@ export class UnrealBridge extends EventEmitter {
   }
   async read(sessionId,args,signal){return this.request(this.target(sessionId),'read_blueprint',readSchema.parse(args),{signal});}
   async catalog(sessionId,args={}){return this.request(this.target(sessionId),'catalog',catalogSchema.parse(args));}
+  async mcpTools(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_list_tools',{}, {signal});}
+  async mcpToolsets(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'list_toolsets',arguments:{}},{signal});}
+  async mcpDescribe(sessionId,args,signal){const {toolsetName}=mcpDescribeSchema.parse(args);return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'describe_toolset',arguments:{toolset_name:toolsetName}},{signal});}
+  async mcpCall(sessionId,args,signal){const {name,arguments:toolArgs,requestId}=mcpCallSchema.parse(args);this.mcpTarget(sessionId);return this.mutate(sessionId,'mcp_call_tool',{name,arguments:toolArgs},requestId,signal);}
+  async mcpCallToolset(sessionId,args,signal){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal);}
   invalidate(editorId,asset){for(const [key,p] of this.previews) if(p.editorId===editorId&&(!asset||p.params.assetPath.split('.')[0]===asset.split('.')[0]))this.previews.delete(key);}
   async preview(sessionId,kind,args,signal){
     const params=kind==='patch'?patchSchema.parse(args):createSchema.parse(args); const editor=this.target(sessionId);
@@ -117,7 +123,7 @@ export class UnrealBridge extends EventEmitter {
     if(this.inflight.has(sessionId))fail('BUSY','Another write is in progress');
     this.inflight.set(sessionId,requestId);
     try {
-      await this.audit({phase:'requested',sessionId,editorId:editor.editorId,requestId,method,assetPath:params.assetPath,paramsHash:hash});
+      await this.audit({phase:'requested',sessionId,editorId:editor.editorId,requestId,method,assetPath:params.assetPath,toolName:params.name,paramsHash:hash});
       const result=await this.request(editor,method,params,{id:requestId,signal});
       this.results.set(key,{hash,result}); if(this.results.size>1000)this.results.delete(this.results.keys().next().value);
       await this.audit({phase:'completed',sessionId,editorId:editor.editorId,requestId,method,revision:result?.revision}).catch(e=>this.emit('diagnostic',`Audit completion failed: ${e.message}`));

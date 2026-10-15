@@ -19,6 +19,11 @@ export const patchSchema = z.object({assetPath, graph:id, baseRevision:id, opera
 export const createSchema = z.object({assetPath, parent:z.enum(['Actor','ActorComponent','Object']).default('Actor')}).strict();
 export const readSchema = z.object({assetPath, graph:id.optional(), nodeIds:z.array(id).max(50).optional(), detail:z.enum(['summary','full']).default('summary')}).strict();
 export const catalogSchema = z.object({query:z.string().max(100).optional(),limit:z.number().int().min(1).max(50).default(20)}).strict();
+export const mcpToolName = z.string().min(1).max(160).regex(/^[A-Za-z0-9_.-]+$/);
+export const mcpArguments = z.record(z.string(),z.json());
+export const mcpDescribeSchema = z.object({toolsetName:mcpToolName}).strict();
+export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
+export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const helloSchema = z.object({type:z.literal('hello'), protocol:z.literal(VERSION), editorId:id, project:z.string().min(1).max(512), projectPath:z.string().max(2048), engineVersion:z.string().max(80), pid:z.number().int().positive(), capabilities:z.array(id).max(64)}).strict();
 export const selectionSchema = z.object({assets:z.array(z.object({path:z.string().max(1024), class:z.string().max(256)}).strict()).max(256)}).strict();
 

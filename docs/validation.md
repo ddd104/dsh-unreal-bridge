@@ -46,3 +46,17 @@ UE 插件新增至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。没有改动 `E
 - Content Browser 选区事件传输、会话隔离和面板显示经过受控事件测试；后台无界面 UE 的脚本点选未产生可验证的真实选区结果，因此没有将真实 GUI 点选列为通过项。
 - EHV 中验证了插件编译与引擎二进制兼容性，没有启动并修改用户工程资产。完整蓝图写入测试在独立工程完成。
 - 未验证 DSH 源码目录中的 0.2.1-alpha.3 构建、其他 UE 版本或其他操作系统。完整交付范围及不支持的蓝图类型见 README。
+
+## 2026-10-15 MCP 接入增量验证
+
+- `npm run check` 成功，17 项 JavaScript 测试通过；新增测试覆盖按会话绑定发现 MCP 工具、实际调用的批准门控与请求去重、旧版 UE 不支持 MCP 时的明确报错。
+- 使用本机 UEAS58 对新增 `DSHUnrealBridgeMCP` 模块与主模块执行 `BuildPlugin`，两个模块编译、链接成功。
+- 在独立的可丢弃 UE 工程启动真实编辑器，发现 `list_toolsets`、`describe_toolset`、`call_tool`，读取 `AssetTools` schema，并直接调用资产搜索、文件夹创建、存在性查询、移动和删除；请求状态查询返回完成。脚本执行工具调用被拒绝。
+- 已将新二进制和源码同步至 EHV 插件目录，旧目录备份在 `F:\UE5Project\EHV\Saved\DSHUnrealBridgeBackups\mcp-20261015-151104`；DSH desktop 宿主 bundle 已同步，旧 bundle 备份在 `%USERPROFILE%\.dsh\profiles\desktop\.plugin-manager\dsh-unreal-bridge-backups\mcp-20261015-151120`。DSH 进程需重启后加载新宿主代码。
+- 没有修改 EHV 项目的资产；增删改查验证只作用于临时工程。未针对 EHV 的业务资产执行 MCP 写入。
+
+## 2026-10-15 MCP 默认执行修复（宿主 0.1.3）
+
+- `npm run check` 成功，17 项测试通过；MCP 顶层工具和工具集调用在批准服务拒绝时仍能执行，且继续验证会话绑定、请求编号去重和不支持 MCP 的编辑器报错。
+- 蓝图补丁应用、撤销和保存仍使用原有 DSH 批准流程；UE MCP 层的脚本执行拦截与 `allowWrites` 写入开关未更改。
+- 对话指导明确优先使用蓝图默认对象及属性 MCP 工具查询类默认值，不生成 `.uasset` 解析脚本。

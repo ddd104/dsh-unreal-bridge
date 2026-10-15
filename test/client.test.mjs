@@ -10,10 +10,22 @@ test('client mounts the callable Remote namespace before registering the dock',a
   await apply(ctx);const ui=definition.inject('conversation-a');assert.deepEqual(await ui.read(),{sessionId:'conversation-a'});await ui.bind('editor-b');assert.deepEqual(calls,[['conversation-a','editor-b']]);
   ctx.remote.unrealBridge.state=async()=>({ok:false,error:{code:'DISCONNECTED',message:'The editor disconnected'}});await assert.rejects(ui.read(),/editor disconnected/);
 });
-test('conversation dock displays selection and binds only through its session callback',async()=>{
+test('conversation dock keeps assets collapsed, reveals a scrollable list, and binds through its session callback',async()=>{
   let tree;const choices=[];const state={version:1,editorId:'ue1',connected:true,editors:[{editorId:'ue1',project:'EHV',engineVersion:'5.8',pid:9}],selection:[{path:'/Game/BP_Demo.BP_Demo'}]};
   await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,bind:async id=>{choices.push(id);return{...state,version:2,editorId:id,connected:!!id};}}));});
-  assert.match(JSON.stringify(tree.toJSON()),/EHV/);assert.match(JSON.stringify(tree.toJSON()),/BP_Demo/);
+  assert.match(JSON.stringify(tree.toJSON()),/EHV/);
+  assert.match(JSON.stringify(tree.toJSON()),/已选择 1 个资产/);
+  assert.equal(JSON.stringify(tree.toJSON()).includes('BP_Demo'),false);
+  const toggle=tree.root.findByType('button');
+  assert.equal(toggle.props['aria-expanded'],false);
+  await act(async()=>toggle.props.onClick());
+  assert.equal(tree.root.findByType('button').props['aria-expanded'],true);
+  assert.match(JSON.stringify(tree.toJSON()),/BP_Demo/);
+  const list=tree.root.findByType('ul');
+  assert.equal(list.props.style.overflowY,'auto');
+  assert.equal(list.props.style.maxHeight,160);
+  await act(async()=>tree.root.findByType('button').props.onClick());
+  assert.equal(JSON.stringify(tree.toJSON()).includes('BP_Demo'),false);
   await act(async()=>{await tree.root.findByType('select').props.onChange({target:{value:''}});});assert.deepEqual(choices,[null]);
   await act(async()=>tree.unmount());
 });

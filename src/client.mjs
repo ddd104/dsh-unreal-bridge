@@ -1,21 +1,87 @@
 import React,{useEffect,useState} from 'react';
 import {TYPERT_REMOTE} from './remote.mjs';
+
 const h=React.createElement;
+const colors={
+  panel:'#232730',surface:'#1c2028',border:'#363d49',text:'#f1f3f7',muted:'#a6afbd',
+  accent:'#80aaff',online:'#55c995',warning:'#e5b56a',error:'#f18d91'
+};
+const assetName=path=>path.split('/').pop()?.split('.')[0]||path;
+
 export const inject=['slots','sessions','remote'];
+
 export function UnrealDock({read,bind}) {
-  const [state,setState]=useState(null),[error,setError]=useState(''),[busy,setBusy]=useState(false);
-  useEffect(()=>{let active=true;let timer;setState(null);const refresh=async()=>{try{const s=await read();if(active){setState(previous=>previous&&previous.version>s.version?previous:s);setError('');}}catch(e){if(active)setError(e.message??String(e));}finally{if(active)timer=setTimeout(refresh,700);}};refresh();return()=>{active=false;clearTimeout(timer);};},[read]);
-  const select=async event=>{setBusy(true);try{setState(await bind(event.target.value||null));setError('');}catch(e){setError(e.message??String(e));}finally{setBusy(false);}};
-  return h('section',{style:{margin:'6px auto',padding:'10px 12px',border:'1px solid var(--dsw-alias-border-l4,#69717d)',borderRadius:10,maxWidth:760,fontSize:12,color:'inherit',background:'var(--dsw-alias-bg-base,transparent)'},'aria-label':'Unreal Editor'},
-    h('div',{style:{display:'flex',gap:10,alignItems:'center'}},h('strong',null,'Unreal Editor'),
-      h('select',{'aria-label':'选择编辑器实例',disabled:busy||!state,value:state?.editorId??'',onChange:select,style:{flex:1,minWidth:100,color:'inherit',background:'inherit',padding:4,borderRadius:5}},
-        h('option',{value:''},'选择要连接的项目'),...(state?.editors??[]).map(e=>h('option',{key:e.editorId,value:e.editorId},`${e.project} · UE ${e.engineVersion} · ${e.pid}`)),
-        state?.editorId&&!state.connected?h('option',{value:state.editorId},'已绑定的编辑器离线'):null),
-      h('span',{style:{color:state?.connected?'#36a76b':'#a0a0a0'}},state?.connected?'已连接':'未连接')),
-    h('div',{style:{marginTop:6,overflowWrap:'anywhere'}},state?.selection?.length?`已选资产：${state.selection.map(x=>x.path).join('、')}`:'在内容浏览器选择资产后，可在此对话中提出修改要求。'),
-    state?.uncertain?h('div',{role:'status',style:{color:'#d99234',marginTop:4}},`上次操作结果待确认：${state.uncertain.requestId}`):null,
-    error?h('div',{role:'alert',style:{color:'#db6565',marginTop:4}},error):null);
+  const [state,setState]=useState(null);
+  const [error,setError]=useState('');
+  const [busy,setBusy]=useState(false);
+  const [expanded,setExpanded]=useState(false);
+
+  useEffect(()=>{
+    let active=true;
+    let timer;
+    setState(null);
+    setExpanded(false);
+    const refresh=async()=>{
+      try{
+        const next=await read();
+        if(active){setState(previous=>previous&&previous.version>next.version?previous:next);setError('');}
+      }catch(e){if(active)setError(e.message??String(e));}
+      finally{if(active)timer=setTimeout(refresh,700);}
+    };
+    refresh();
+    return()=>{active=false;clearTimeout(timer);};
+  },[read]);
+
+  const select=async event=>{
+    setBusy(true);
+    setExpanded(false);
+    try{setState(await bind(event.target.value||null));setError('');}
+    catch(e){setError(e.message??String(e));}
+    finally{setBusy(false);}
+  };
+
+  const assets=state?.selection??[];
+  const connected=!!state?.connected;
+  const count=assets.length;
+
+  return h('section',{
+    'aria-label':'Unreal Editor 工作区',
+    style:{boxSizing:'border-box',width:'calc(100% - 16px)',maxWidth:712,margin:'0 auto 8px',padding:'10px 14px',border:`1px solid ${colors.border}`,borderRadius:12,backgroundColor:colors.panel,color:colors.text,boxShadow:'0 6px 20px rgba(0,0,0,.18)',fontSize:12}
+  },
+    h('div',{style:{display:'flex',alignItems:'center',flexWrap:'wrap',columnGap:12,rowGap:8}},
+      h('div',{style:{display:'flex',alignItems:'center',gap:8,flex:'0 0 auto',fontWeight:600,fontSize:13,whiteSpace:'nowrap'}},
+        h('span',{'aria-hidden':true,style:{display:'inline-block',width:8,height:8,borderRadius:2,backgroundColor:colors.accent,boxShadow:'0 0 0 3px rgba(128,170,255,.13)'}}),
+        'Unreal Editor'),
+      h('select',{
+        'aria-label':'选择编辑器实例',disabled:busy||!state,value:state?.editorId??'',onChange:select,
+        style:{boxSizing:'border-box',flex:'1 1 200px',minWidth:0,height:32,padding:'0 10px',border:`1px solid ${colors.border}`,borderRadius:8,backgroundColor:colors.surface,color:colors.text,font:'inherit',outlineColor:colors.accent,cursor:busy?'wait':'pointer'}
+      },
+        h('option',{value:''},'选择要连接的项目'),
+        ...(state?.editors??[]).map(e=>h('option',{key:e.editorId,value:e.editorId},`${e.project} · UE ${e.engineVersion} · ${e.pid}`)),
+        state?.editorId&&!connected?h('option',{value:state.editorId},'已绑定的编辑器离线'):null),
+      h('span',{role:'status',style:{display:'inline-flex',alignItems:'center',gap:6,flex:'0 0 auto',color:connected?colors.online:colors.muted,whiteSpace:'nowrap'}},
+        h('span',{'aria-hidden':true,style:{width:6,height:6,borderRadius:'50%',backgroundColor:connected?colors.online:colors.muted}}),
+        connected?'已连接':state?.editorId?'连接中断':'未连接')),
+    h('div',{style:{display:'flex',alignItems:'center',minHeight:28,marginTop:8,paddingTop:8,borderTop:`1px solid ${colors.border}`}},
+      count>0
+        ?h('button',{
+          type:'button','aria-expanded':expanded,'aria-controls':'unreal-bridge-assets',onClick:()=>setExpanded(value=>!value),
+          style:{display:'inline-flex',alignItems:'center',gap:7,padding:0,border:0,background:'none',color:colors.text,font:'inherit',fontWeight:500,cursor:'pointer',outlineColor:colors.accent}
+        },
+          h('span',{'aria-hidden':true,style:{color:colors.accent,fontSize:14}},'▣'),
+          `已选择 ${count} 个资产`,
+          h('span',{'aria-hidden':true,style:{color:colors.muted,fontSize:10,transform:expanded?'rotate(180deg)':'none',transition:'transform 150ms'}},'▼'))
+        :h('span',{style:{color:colors.muted}},connected?'未选择资产 · 可在内容浏览器中选择':'连接项目后可查看所选资产')),
+    count>0&&expanded?h('ul',{
+      id:'unreal-bridge-assets','aria-label':'已选择的资产',
+      style:{boxSizing:'border-box',maxHeight:160,overflowY:'auto',overscrollBehavior:'contain',margin:'8px 0 0',padding:'4px 8px',listStyle:'none',border:`1px solid ${colors.border}`,borderRadius:8,backgroundColor:colors.surface}
+    },assets.map((asset,index)=>h('li',{key:`${asset.path}-${index}`,style:{padding:'7px 5px',borderBottom:index<count-1?`1px solid ${colors.border}`:0,overflowWrap:'anywhere'}},
+      h('div',{style:{fontWeight:500,color:colors.text}},assetName(asset.path)),
+      h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},asset.path)))):null,
+    state?.uncertain?h('div',{role:'status',style:{color:colors.warning,marginTop:7,overflowWrap:'anywhere'}},`上次操作结果待确认：${state.uncertain.requestId}`):null,
+    error?h('div',{role:'alert',style:{color:colors.error,marginTop:7,overflowWrap:'anywhere'}},error):null);
 }
+
 export async function apply(ctx) {
   await ctx.remote.$mount(TYPERT_REMOTE);
   ctx.inject(['remote.unrealBridge'],child=>{

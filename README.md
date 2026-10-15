@@ -1,4 +1,4 @@
-# DSH Unreal Bridge 0.1.2
+# DSH Unreal Bridge 0.1.3
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 选区，通过模型工具读取、预览、修改、编译和保存普通蓝图。
 
@@ -22,7 +22,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 4. 在 DSH 的批准提示中允许后，修改才会执行。模型应先读当前版本，再查询函数/引脚、生成补丁、预览并应用。
 5. 检查编辑器后明确要求保存；也可要求撤销最近一次插件图修改。
 
-**权限模式：** 插件默认调用 DSH 批准服务。DSH 的 `approval: never` 会拒绝这类请求，因此需要在该对话选择允许询问批准的模式（例如本机的 `workspace-write`）。插件不会更改你的全局权限设置。`requireApproval: false` 是配置选项，仅适合你明确决定无需逐次批准的环境。
+对其他资产提出查询、创建、修改或删除要求时，DSH 先列出 UE 5.8 MCP 工具集、读取目标工具的参数说明，再直接调用已绑定编辑器里的工具。无需生成 Python、Shell 或 Editor Utility 脚本。实际可用操作取决于工程启用的 UE 工具集；本机 EHV 已启用 `ModelContextProtocol` 与 `AllToolsets`。脚本执行型 MCP 工具在桥接层被拒绝。
+
+**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 仍会禁用 MCP 调用和其他写入。插件自己的蓝图应用、撤销和保存仍调用 DSH 批准服务；`approval: never` 会拒绝这些操作。`requireApproval: false` 只控制插件自己的蓝图写入批准，不影响 MCP 的默认执行方式。
 
 ## 已实现
 
@@ -30,6 +32,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 | --- | --- |
 | 实例发现与会话隔离 | UE 主动连接本机桥接器；显示项目、PID、引擎版本；每个对话独立绑定 |
 | 选区与蓝图变化 | 编辑器事件推送；已读取蓝图的变化使旧预览失效；UI 从 DSH 缓存刷新 |
+| UE 5.8 MCP 工具 | 独立 `DSHUnrealBridgeMCP` 模块直接访问当前编辑器注册的工具；支持发现工具集、读取 schema 和按名调用 |
 | 读取与 Token 控制 | 默认返回图摘要；可按图、节点编号读取节点/引脚/连接 |
 | 函数目录 | 搜索已加载的原生 BlueprintCallable / BlueprintEvent 函数及其引脚 |
 | 创建 | 新建 Actor、ActorComponent、Object 普通蓝图，拒绝覆盖现有资产 |
@@ -41,7 +44,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 
 ## 支持范围
 
-- 仅普通 `UBlueprint` 和 `/Game/` 资产。Widget、AnimBlueprint、材质、场景编辑、自定义蓝图函数调用、变量创建、组件树修改、宏/分支等特殊节点不在本版本操作集合中。
+- 本插件自带的蓝图图操作仅支持普通 `UBlueprint` 和 `/Game/` 资产。其他资产操作由当前 UE 5.8 实例实际注册的 MCP 工具集决定；可先发现工具与参数，不承诺每一种资产类型都有对应的工具。
+- MCP 工具可能立即保存、移动或删除资产，默认直接执行；这些工具不使用本插件的蓝图预览与版本校验。`ProgrammaticToolset` 等脚本执行入口被桥接层禁用。
 - 原生函数必须已加载且对蓝图公开；废弃和内部函数被过滤。事件必须适用于资产父类。引脚连接不隐式拆线或增加转换节点。
 - 默认值不支持对象、类及本地化文本引用。每次补丁最多 100 个操作。响应上限 2 MiB；较大图应按图/节点筛选读取。
 - 冲突采用拒绝并重新读取/预览；没有自动三方合并、任意历史版本回滚或跨进程持久化撤销。创建新资产不提供插件删除工具。

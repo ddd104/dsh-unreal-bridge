@@ -12,8 +12,8 @@ import {apply} from '../src/index.mjs';
 
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 async function fixture(t,config={}){const stateDir=await mkdtemp(join(tmpdir(),'dsh-bridge-'));const b=await new UnrealBridge({port:0,stateDir,heartbeatMs:1000,...config}).start();t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});return b;}
-async function editor(b,editorId='UE1',handler=msg=>({echo:msg.method})){
-  const ws=new WebSocket(b.descriptor.url,{headers:{Authorization:`Bearer ${b.token}`}});await once(ws,'open');const ack=once(ws,'message');ws.send(JSON.stringify({type:'hello',protocol:1,editorId,project:editorId,projectPath:`/tmp/${editorId}`,engineVersion:'5.8',pid:123,capabilities:['read_blueprint','apply_patch']}));await ack;
+async function editor(b,editorId='UE1',handler=msg=>({echo:msg.method}),capabilities=['read_blueprint','apply_patch']){
+  const ws=new WebSocket(b.descriptor.url,{headers:{Authorization:`Bearer ${b.token}`}});await once(ws,'open');const ack=once(ws,'message');ws.send(JSON.stringify({type:'hello',protocol:1,editorId,project:editorId,projectPath:`/tmp/${editorId}`,engineVersion:'5.8',pid:123,capabilities}));await ack;
   ws.on('message',async raw=>{const m=JSON.parse(raw);if(m.type!=='request')return;const result=await handler(m);if(result!==undefined)ws.send(JSON.stringify({type:'response',id:m.id,ok:true,result}));});return ws;
 }
 const patch=()=>({assetPath:'/Game/Test/BP_Test',graph:'EventGraph',baseRevision:'v1',operations:[{op:'add_node',nodeId:'temp1',kind:'call_function',functionPath:'/Script/Engine.KismetSystemLibrary:PrintString'}]});
@@ -36,5 +36,43 @@ test('DSH tools require a session and actual approval before writing',async t=>{
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());const args={previewId:p.previewId,requestId:randomUUID()};
   assert.equal((await tools.get('unreal_state').execute({},{})).error.code,'SESSION_REQUIRED');
   assert.equal((await tools.get('unreal_apply').execute(args,exec)).error.code,'PERMISSION_DENIED');assert.equal(writes,0);approve=true;assert.equal((await tools.get('unreal_apply').execute(args,exec)).ok,true);assert.equal(writes,1);
-  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,10);
+  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,15);
+});
+
+test('UE MCP calls run without approval and stay in the bound editor with request IDs',async t=>{
+  const stateDir=await mkdtemp(join(tmpdir(),'dsh-mcp-'));
+  const tools=new Map(),services=new Map(),calls=[];
+  let approvalRequests=0;
+  const ctx={tools:{register:d=>tools.set(d.name,d)},systemPrompt:{section(){}},typert:{register(){}},provide:(k,v)=>services.set(k,v),effect:f=>f(),get:k=>k==='approval'?{request:async()=>{approvalRequests++;return 'rejected';}}:undefined};
+  await apply(ctx,{stateDir,port:0});
+  const bridge=services.get('unrealBridge').bridge;
+  t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
+  await editor(bridge,'A',message=>{calls.push(['A',message]);return{content:[{type:'text',text:message.method}]};},['mcp_tools']);
+  await editor(bridge,'B',message=>{calls.push(['B',message]);return{content:[{type:'text',text:message.method}]};},['mcp_tools']);
+  bridge.bind('chat','A');
+  const exec={agent:{session:{id:'chat'}},name:'unreal_mcp_call_toolset',callId:'call',signal:new AbortController().signal};
+  assert.equal((await tools.get('unreal_mcp_toolsets').execute({},exec)).ok,true);
+  assert.equal(calls.at(-1)[0],'A');
+  assert.equal(calls.at(-1)[1].params.name,'list_toolsets');
+  assert.equal((await tools.get('unreal_mcp_describe').execute({toolsetName:'EditorToolset'},exec)).ok,true);
+  assert.equal(calls.at(-1)[1].params.name,'describe_toolset');
+  const args={toolsetName:'EditorToolset',toolName:'GetSelectedAssets',arguments:{},requestId:randomUUID()};
+  const first=await tools.get('unreal_mcp_call_toolset').execute(args,exec);
+  assert.equal(first.ok,true);
+  assert.equal(calls.at(-1)[1].method,'mcp_call_tool');
+  assert.deepEqual(calls.at(-1)[1].params,{name:'call_tool',arguments:{toolset_name:'EditorToolset',tool_name:'GetSelectedAssets',arguments:{}}});
+  const count=calls.length;
+  assert.deepEqual(await tools.get('unreal_mcp_call_toolset').execute(args,exec),first);
+  assert.equal(calls.length,count);
+  assert.equal((await tools.get('unreal_mcp_call').execute({name:'list_toolsets',arguments:{},requestId:randomUUID()},exec)).ok,true);
+  assert.equal(calls.at(-1)[1].params.name,'list_toolsets');
+  assert.equal(approvalRequests,0);
+  bridge.bind('chat','B');
+  assert.equal((await tools.get('unreal_mcp_toolsets').execute({},exec)).ok,true);
+  assert.equal(calls.at(-1)[0],'B');
+});
+
+test('UE MCP calls reject editors without the capability',async t=>{
+  const bridge=await fixture(t);await editor(bridge);bridge.bind('chat','UE1');
+  await assert.rejects(bridge.mcpTools('chat'),{code:'MCP_UNAVAILABLE'});
 });

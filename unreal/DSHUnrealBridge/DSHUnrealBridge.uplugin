@@ -7,5 +7,9 @@
   "Category": "Editor",
   "CanContainContent": false,
   "EnabledByDefault": true,
-  "Modules": [{"Name":"DSHUnrealBridge","Type":"Editor","LoadingPhase":"PostEngineInit"}]
+  "Modules": [
+    {"Name":"DSHUnrealBridgeMCP","Type":"Editor","LoadingPhase":"PostEngineInit"},
+    {"Name":"DSHUnrealBridge","Type":"Editor","LoadingPhase":"PostEngineInit"}
+  ],
+  "Plugins": [{"Name":"ModelContextProtocol","Enabled":true}]
 }
