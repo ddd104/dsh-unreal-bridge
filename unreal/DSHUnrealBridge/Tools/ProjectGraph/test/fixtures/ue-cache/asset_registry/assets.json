@@ -1,0 +1,24 @@
+{
+  "assets": [
+    {
+      "assetPath": "/Game/UI/BP_TestWidget.BP_TestWidget",
+      "assetClass": "/Script/UMGEditor.WidgetBlueprint",
+      "packageName": "/Game/UI/BP_TestWidget",
+      "dependencies": [
+        "/Game/Materials/M_Test"
+      ],
+      "referencers": []
+    },
+    {
+      "assetPath": "/Game/Materials/M_Test.M_Test",
+      "assetClass": "/Script/Engine.Material",
+      "packageName": "/Game/Materials/M_Test",
+      "dependencies": [
+        "/Game/Textures/T_Test"
+      ],
+      "referencers": [
+        "/Game/UI/BP_TestWidget"
+      ]
+    }
+  ]
+}

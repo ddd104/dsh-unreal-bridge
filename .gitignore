@@ -13,3 +13,7 @@ audit*.jsonl
 .vs/
 unreal/**/Saved/
 unreal/**/DerivedDataCache/
+unreal/**/Cache/
+unreal/**/Runtime/
+unreal/**/Tools/**/dist/
+unreal/**/Tools/**/node_modules/

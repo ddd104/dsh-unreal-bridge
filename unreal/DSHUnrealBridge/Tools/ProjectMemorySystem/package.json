@@ -1,0 +1,21 @@
+{
+  "name": "project-memory-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "memory": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "\"..\\..\\Runtime\\Win64\\node.exe\" ../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "\"..\\..\\Runtime\\Win64\\node.exe\" ../run-package-test.mjs ProjectMemorySystem",
+    "memory": "\"..\\..\\Runtime\\Win64\\node.exe\" dist/src/cli.js"
+  },
+  "engines": {
+    "node": ">=24.15.0 <25"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  }
+}

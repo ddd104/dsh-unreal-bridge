@@ -1,0 +1,14 @@
+{
+  "assetPath": "/Game/Materials/M_Test.M_Test",
+  "materialDomain": "Surface",
+  "blendMode": "Opaque",
+  "shadingModel": "DefaultLit",
+  "expressions": [
+    {
+      "name": "TextureSample_0",
+      "class": "/Script/Engine.MaterialExpressionTextureSample",
+      "caption": ["Texture Sample"],
+      "texture": "/Game/Textures/T_Test"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "name": "ue-project-graph",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "project-graph": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "\"..\\..\\Runtime\\Win64\\node.exe\" ../node_modules/typescript/bin/tsc -p tsconfig.json",
+    "test": "\"..\\..\\Runtime\\Win64\\node.exe\" ../run-package-test.mjs ProjectGraph",
+    "graph": "\"..\\..\\Runtime\\Win64\\node.exe\" dist/src/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=24.15.0 <25"
+  }
+}

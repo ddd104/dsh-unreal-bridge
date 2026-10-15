@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "projectId": "$project",
+  "project": {
+    "name": "$project",
+    "root": ".",
+    "uproject": "$uproject",
+    "primaryModule": "Source",
+    "targetPlatforms": []
+  },
+  "pathRules": {
+    "pathBase": "projectRoot",
+    "allConfiguredPathsAreRelativeTo": "projectRoot"
+  },
+  "knowledgeRoots": [
+    "ProjectKnowledge",
+    "ProjectDocumentation",
+    "Docs",
+    "DesignDocs",
+    "TechnicalDesign",
+    "GameDesign",
+    "Tables"
+  ],
+  "memoryOutputRoot": "Plugins/DSHUnrealBridge/Cache/Memory",
+  "sourcePolicy": {
+    "includeExtensions": [
+      ".md",
+      ".txt",
+      ".proto",
+      ".json",
+      ".jsonl",
+      ".csv",
+      ".tsv",
+      ".yaml",
+      ".yml",
+      ".ini",
+      ".xlsx",
+      ".docx"
+    ],
+    "includePatterns": [
+      "**/*"
+    ],
+    "excludePatterns": [
+      "**/.git/**",
+      "**/.codex/**",
+      "**/.agents/**",
+      "**/.ai/project-memory/**",
+      "**/Binaries/**",
+      "**/Intermediate/**",
+      "**/DerivedDataCache/**",
+      "**/Saved/**",
+      "**/ArchivedBuilds/**",
+      "**/Releases/**",
+      "**/Build/**",
+      "**/Platforms/**",
+      "**/node_modules/**",
+      "**/*.uasset",
+      "**/*.umap",
+      "**/*.dll",
+      "**/*.so",
+      "**/*.apk",
+      "**/*.aar",
+      "**/*.jar",
+      "Plugins/DSHUnrealBridge/Tools/**",
+      "Plugins/DSHUnrealBridge/Runtime/**",
+      "Plugins/DSHUnrealBridge/Cache/**",
+      "**/.env*",
+      "**/*credentials*",
+      "**/*secrets*",
+      "**/generated/**",
+      "**/dist/**"
+    ],
+    "sourceRoots": [
+      "Source",
+      "Script",
+      "Plugins",
+      "Config"
+    ],
+    "excludeGlobs": [
+      "**/.git/**",
+      "**/.codex/**",
+      "**/.agents/**",
+      "**/.ai/project-memory/**",
+      "**/Binaries/**",
+      "**/Intermediate/**",
+      "**/DerivedDataCache/**",
+      "**/Saved/**",
+      "**/ArchivedBuilds/**",
+      "**/Releases/**",
+      "**/Build/**",
+      "**/Platforms/**",
+      "**/node_modules/**",
+      "**/*.uasset",
+      "**/*.umap",
+      "**/*.dll",
+      "**/*.so",
+      "**/*.apk",
+      "**/*.aar",
+      "**/*.jar",
+      "Plugins/DSHUnrealBridge/Tools/**",
+      "Plugins/DSHUnrealBridge/Runtime/**",
+      "Plugins/DSHUnrealBridge/Cache/**",
+      "**/.env*",
+      "**/*credentials*",
+      "**/*secrets*",
+      "**/generated/**",
+      "**/dist/**"
+    ],
+    "readOnlyBinaryAssets": true
+  },
+  "memory": {
+    "language": "zh-CN",
+    "requireCitations": true,
+    "chunking": {
+      "targetChars": 1800,
+      "overlapChars": 180
+    },
+    "cache": {
+      "hashAlgorithm": "sha256",
+      "writeManifest": true,
+      "writeSourceIndex": true
+    }
+  },
+  "graph": {
+    "enabled": true,
+    "mode": "sqlite",
+    "sqlitePath": "Plugins/DSHUnrealBridge/Cache/Graph/project_graph.sqlite",
+    "supportedModes": [
+      "sqlite"
+    ],
+    "optional": true,
+    "sqlite": {
+      "databasePath": "Plugins/DSHUnrealBridge/Cache/Graph/project_graph.sqlite",
+      "nodesPath": "Plugins/DSHUnrealBridge/Cache/Graph/nodes.jsonl",
+      "edgesPath": "Plugins/DSHUnrealBridge/Cache/Graph/edges.jsonl"
+    },
+    "ueCacheRoots": {
+      "blueprints": "Plugins/DSHUnrealBridge/Cache/UE/blueprint_ir",
+      "assets": "Plugins/DSHUnrealBridge/Cache/UE/asset_registry",
+      "materials": "Plugins/DSHUnrealBridge/Cache/UE/material_ir"
+    }
+  },
+  "validation": {
+    "buildCommands": "ProjectKnowledge/validation/build_commands.json",
+    "testMap": "ProjectKnowledge/validation/test_map.json"
+  }
+}

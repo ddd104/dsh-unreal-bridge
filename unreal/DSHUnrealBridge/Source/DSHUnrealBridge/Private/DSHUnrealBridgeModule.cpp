@@ -1,6 +1,7 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
 #include "IDSHUnrealBridgeMCPModule.h"
+#include "ProjectKnowledgeService.h"
 #include "AssetRegistry/AssetData.h"
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
@@ -58,6 +59,8 @@ public:
     void Stop()
     {
         ++Generation;
+        for (const auto& Pending : PendingKnowledge) FProjectKnowledgeService::Cancel(Pending.Value);
+        PendingKnowledge.Reset();
         FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
         if(FModuleManager::Get().IsModuleLoaded(TEXT("ContentBrowser")))FModuleManager::GetModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser")).GetOnAssetSelectionChanged().Remove(SelectionHandle);
         FCoreUObjectDelegates::OnObjectTransacted.Remove(TransactedHandle);FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(PropertyHandle);
@@ -78,6 +81,7 @@ private:
     TMap<FString,TSharedPtr<FJsonObject>> Results;
     TMap<FString,FString> RequestHashes;
     TSet<FString> PendingMcp;
+    TMap<FString, FGuid> PendingKnowledge;
     TArray<FString> ResultOrder;
     TMap<TWeakObjectPtr<UBlueprint>,FString> Watched;
     TSet<TWeakObjectPtr<UBlueprint>> Dirty;
@@ -111,7 +115,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message)
     {
@@ -138,13 +142,15 @@ private:
         const auto Params=*ParamsPtr;
         if(Method==TEXT("request_status"))
         {
-            const FString QueryId=Field(Params,TEXT("requestId"));auto R=MakeShared<FJsonObject>();auto Result=MakeShared<FJsonObject>();Result->SetStringField(TEXT("status"),Results.Contains(QueryId)?TEXT("completed"):PendingMcp.Contains(QueryId)?TEXT("pending"):RequestHashes.Contains(QueryId)?TEXT("expired"):TEXT("unknown"));if(Results.Contains(QueryId))Result->SetObjectField(TEXT("response"),Results[QueryId]);R->SetStringField(TEXT("type"),TEXT("response"));R->SetStringField(TEXT("id"),Id);R->SetBoolField(TEXT("ok"),true);R->SetObjectField(TEXT("result"),Result);Send(R);return;
+            const FString QueryId=Field(Params,TEXT("requestId"));auto R=MakeShared<FJsonObject>();auto Result=MakeShared<FJsonObject>();Result->SetStringField(TEXT("status"),Results.Contains(QueryId)?TEXT("completed"):PendingMcp.Contains(QueryId)||PendingKnowledge.Contains(QueryId)?TEXT("pending"):RequestHashes.Contains(QueryId)?TEXT("expired"):TEXT("unknown"));if(Results.Contains(QueryId))Result->SetObjectField(TEXT("response"),Results[QueryId]);R->SetStringField(TEXT("type"),TEXT("response"));R->SetStringField(TEXT("id"),Id);R->SetBoolField(TEXT("ok"),true);R->SetObjectField(TEXT("result"),Result);Send(R);return;
         }
-        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool");
+        const FString KnowledgeTool=Method==TEXT("knowledge_call")?Field(Params,TEXT("tool")):FString();
+        const bool bKnowledgeWrite=KnowledgeTool==TEXT("remember_evidence")||KnowledgeTool==TEXT("experience_save")||KnowledgeTool==TEXT("experience_feedback");
+        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||bKnowledgeWrite;
         if(bWrite)
         {
             const FTCHARToUTF8 Bytes(*(Method+Encode(Params)));const FString Hash=FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
-            if(const FString* Previous=RequestHashes.Find(Id)){if(*Previous!=Hash)Send(Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters")));else if(Results.Contains(Id))Send(Results[Id]);else if(PendingMcp.Contains(Id))Send(Error(Id,TEXT("IN_PROGRESS"),TEXT("This MCP tool call is still running; query request status")));else Send(Error(Id,TEXT("RESULT_EXPIRED"),TEXT("This write already ran; cached result expired, do not repeat")));return;}
+            if(const FString* Previous=RequestHashes.Find(Id)){if(*Previous!=Hash)Send(Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters")));else if(Results.Contains(Id))Send(Results[Id]);else if(PendingMcp.Contains(Id)||PendingKnowledge.Contains(Id))Send(Error(Id,TEXT("IN_PROGRESS"),TEXT("This tool call is still running; query request status")));else Send(Error(Id,TEXT("RESULT_EXPIRED"),TEXT("This write already ran; cached result expired, do not repeat")));return;}
             if(RequestHashes.Num()>=10000){Send(Error(Id,TEXT("REQUEST_LIMIT"),TEXT("Write request journal is full; restart the editor after reconciling pending requests")));return;}
             RequestHashes.Add(Id,Hash);
         }
@@ -155,6 +161,36 @@ private:
             if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
             if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("MCP tool list exceeds the 2 MiB bridge limit"));
             Send(Response);return;
+        }
+        if(Method==TEXT("knowledge_call"))
+        {
+            const FString Tool=Field(Params,TEXT("tool"));
+            static const TSet<FString> Allowed={TEXT("project_status"),TEXT("project_context"),TEXT("project_search"),TEXT("graph_query"),TEXT("graph_feature"),TEXT("graph_impact"),TEXT("read_source"),TEXT("validate_evidence"),TEXT("read_asset_snapshot"),TEXT("search_asset_snapshots"),TEXT("asset_snapshot"),TEXT("inspect_asset"),TEXT("experience_lookup"),TEXT("remember_evidence"),TEXT("experience_save"),TEXT("experience_feedback")};
+            const TSharedPtr<FJsonObject>* Arguments=nullptr;
+            if(!Allowed.Contains(Tool)||!Params->TryGetObjectField(TEXT("arguments"),Arguments)||!Arguments||!Arguments->IsValid())
+            {
+                Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("Unknown knowledge tool or invalid arguments")));return;
+            }
+            const TWeakPtr<FDSHConnection> Weak=AsShared();
+            const FGuid KnowledgeId=FProjectKnowledgeService::Execute(Tool,*Arguments,nullptr,
+                [Weak,Id,bWrite](bool bSuccess,TSharedPtr<FJsonObject> Result)
+                {
+                    if(auto Self=Weak.Pin())
+                    {
+                        Self->PendingKnowledge.Remove(Id);
+                        TSharedPtr<FJsonObject> Response;
+                        if(bSuccess&&Result.IsValid())
+                        {
+                            Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);
+                        }
+                        else Response=Self->Error(Id,TEXT("KNOWLEDGE_ERROR"),Result.IsValid()?Field(Result,TEXT("error")):TEXT("Knowledge request failed"));
+                        if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Self->Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("Narrow the knowledge query or request a smaller page"));
+                        if(bWrite){Self->Results.Add(Id,Response);Self->ResultOrder.Add(Id);if(Self->ResultOrder.Num()>1024){Self->Results.Remove(Self->ResultOrder[0]);Self->ResultOrder.RemoveAt(0);}}
+                        Self->Send(Response);
+                    }
+                });
+            PendingKnowledge.Add(Id,KnowledgeId);
+            return;
         }
         if(Method==TEXT("mcp_discover")||Method==TEXT("mcp_call_tool"))
         {

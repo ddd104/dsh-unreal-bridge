@@ -1,14 +1,15 @@
 {
   "FileVersion": 3,
-  "Version": 3,
-  "VersionName": "0.1.2",
+  "Version": 4,
+  "VersionName": "0.2.0",
   "FriendlyName": "DSH Unreal Bridge",
-  "Description": "Authenticated local DeepSeek Harness bridge with blueprint previews and revision checks.",
+  "Description": "Authenticated DSH bridge with UE MCP tools, project knowledge and asset snapshots.",
   "Category": "Editor",
   "CanContainContent": false,
   "EnabledByDefault": true,
   "Modules": [
     {"Name":"DSHUnrealBridgeMCP","Type":"Editor","LoadingPhase":"PostEngineInit"},
+    {"Name":"DSHUnrealBridgeKnowledge","Type":"EditorNoCommandlet","LoadingPhase":"PostEngineInit","PlatformAllowList":["Win64"]},
     {"Name":"DSHUnrealBridge","Type":"Editor","LoadingPhase":"PostEngineInit"}
   ],
   "Plugins": [{"Name":"ModelContextProtocol","Enabled":true}]

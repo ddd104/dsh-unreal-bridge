@@ -1,18 +1,26 @@
-# DSH Unreal Bridge 0.1.3
+# DSH Unreal Bridge 0.2.0
 
-DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 选区，通过模型工具读取、预览、修改、编译和保存普通蓝图。
+DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
 ## 本机安装
 
 本交付面向 Windows、已安装的 DSH 0.2.0-rc.2，以及 EHV 使用的 UEAS58（UE 5.8.0）。DSH 源码目录 `F:\AI\deepseek-harness` 用于核对扩展接口；插件独立安装到 DSH desktop 配置，不修改核心代码。UE 插件安装在 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。
 
-发行包内含 DSH 的 `.tgz` 安装包、UE 插件源码与本机引擎对应的 DLL，以及完整插件源码和测试。
+Git 仓库包含 DSH 与 UE 插件源码。UE DLL 由目标引擎编译；知识模块使用安装时准备的 Node.js 24.15.0 和已编译工具。
+
+从 Git 拉取源码后，在 Windows 上双击 `install-dsh.bat`，即可构建安装包并将插件安装到当前用户的 DSH `desktop` 配置。也可以在命令行传入 `.uproject` 路径，同时复制 UE 插件：
+
+```bat
+install-dsh.bat "D:\UnrealProjects\MyGame\MyGame.uproject"
+```
+
+批处理需要 Node.js 22+、npm 和已安装的 DSH；若 DSH 安装在其他位置，可将环境变量 `DSH_CLI` 设为 `dsh.cmd` 的完整路径。安装 UE 插件时，准备脚本会下载并校验固定版本的 Node.js 24.15.0，构建知识工具；运行期不依赖系统 Node。Git 仓库不包含 UE 预编译 DLL，UE 插件需要使用目标工程对应的 Unreal Engine 编译。安装完成后完整退出并重新打开 DSH。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5Project\EHV\EHV.uproject'
 ```
 
-安装脚本先备份 DSH 配置，使用 DSH 官方插件命令安装 bundle，再复制 UE 插件。重复安装会备份已有 UE 插件。安装或升级前关闭目标 UE 编辑器；DSH 界面未自动更新时完整退出并重新打开 DSH。脚本不会结束任何应用。
+安装脚本先备份 DSH 配置，使用 DSH 官方插件命令安装 bundle，再复制 UE 插件。重复安装会备份已有 UE 插件，并保留工程已修改的知识配置与现有缓存。安装或升级前关闭目标 UE 编辑器；DSH 界面未自动更新时完整退出并重新打开 DSH。脚本不会结束任何应用。
 
 ## 使用
 
@@ -24,6 +32,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 
 对其他资产提出查询、创建、修改或删除要求时，DSH 先列出 UE 5.8 MCP 工具集、读取目标工具的参数说明，再直接调用已绑定编辑器里的工具。无需生成 Python、Shell 或 Editor Utility 脚本。实际可用操作取决于工程启用的 UE 工具集；本机 EHV 已启用 `ModelContextProtocol` 与 `AllToolsets`。脚本执行型 MCP 工具在桥接层被拒绝。
 
+## 项目图谱与资料
+
+`DSHUnrealBridgeKnowledge` 是同一个 UE 插件中的编辑器模块。它从源码、配置、项目资料和 UE 资产快照生成图谱与记忆。Agent 使用已绑定编辑器上的 `unreal_knowledge` 查询 `project_status`、`project_context`、`project_search`、`graph_query`、`graph_feature`、`graph_impact`、`read_source` 和分页资产快照；需要保留带来源的结论时，用 `unreal_knowledge_record` 保存。它不启动独立的 Graph/Memory MCP 服务，也不开放旧的固定端口 HTTP 服务；实时资产修改继续走 UE MCP。
+
+把人工维护的项目说明放在工程的 `ProjectKnowledge/`、`Docs/` 等目录；生成的索引、记忆与快照在 `Plugins/DSHUnrealBridge/Cache/`。插件配置在 `Config/Knowledge/ProjectMemory.project.json`，支持文本、Markdown、JSON、CSV、YAML、INI、`.proto`、DOCX 和 XLSX。PDF 与旧 `.xls` 需先转为受支持格式。需要新鲜的全项目知识时，在 UE 编辑器菜单中执行“更新项目图谱与知识记忆”。常规查询不会自动重建；图谱命中与记忆摘要应由当前源码和编辑器状态核实。
+
+安装脚本发现旧 `AgentProjectGraph/Cache` 时，会复制其 UE 快照及证据到新插件缓存，再把旧插件移入工程的 `Saved/DSHUnrealBridgeBackups/`，避免旧菜单与 HTTP 服务继续加载。旧图谱和记忆不会直接复用；在编辑器中更新一次即可按新路径重建。
+
 **权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 仍会禁用 MCP 调用和其他写入。插件自己的蓝图应用、撤销和保存仍调用 DSH 批准服务；`approval: never` 会拒绝这些操作。`requireApproval: false` 只控制插件自己的蓝图写入批准，不影响 MCP 的默认执行方式。
 
 ## 已实现
@@ -33,6 +49,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 | 实例发现与会话隔离 | UE 主动连接本机桥接器；显示项目、PID、引擎版本；每个对话独立绑定 |
 | 选区与蓝图变化 | 编辑器事件推送；已读取蓝图的变化使旧预览失效；UI 从 DSH 缓存刷新 |
 | UE 5.8 MCP 工具 | 独立 `DSHUnrealBridgeMCP` 模块直接访问当前编辑器注册的工具；支持发现工具集、读取 schema 和按名调用 |
+| 项目知识 | 同插件的 `DSHUnrealBridgeKnowledge` 编辑器模块提供源码、资料、图谱与分页资产快照查询；缓存有项目身份和新鲜度校验 |
 | 读取与 Token 控制 | 默认返回图摘要；可按图、节点编号读取节点/引脚/连接 |
 | 函数目录 | 搜索已加载的原生 BlueprintCallable / BlueprintEvent 函数及其引脚 |
 | 创建 | 新建 Actor、ActorComponent、Object 普通蓝图，拒绝覆盖现有资产 |
@@ -49,7 +66,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 - 原生函数必须已加载且对蓝图公开；废弃和内部函数被过滤。事件必须适用于资产父类。引脚连接不隐式拆线或增加转换节点。
 - 默认值不支持对象、类及本地化文本引用。每次补丁最多 100 个操作。响应上限 2 MiB；较大图应按图/节点筛选读取。
 - 冲突采用拒绝并重新读取/预览；没有自动三方合并、任意历史版本回滚或跨进程持久化撤销。创建新资产不提供插件删除工具。
-- 当前仅验证 Windows、本机 DSH 0.2.0-rc.2 和 UEAS58。其他 UE 构建应重新编译；macOS/Linux 只有路径处理代码，未经编译与运行验证。
+- 当前仅验证 Windows、本机 DSH 0.2.0-rc.2 和 UEAS58。知识模块和固定 Node 运行环境只面向 Win64；其他 UE 构建应重新编译并提供对应运行环境。
 - 会话绑定与预览在 DSH 进程内保存；重启 DSH 后重新绑定。断线重连同一编辑器保留绑定。写请求日志在 UE 进程内保存，不能恢复已退出编辑器的执行结果。
 
 ## 配置与排错

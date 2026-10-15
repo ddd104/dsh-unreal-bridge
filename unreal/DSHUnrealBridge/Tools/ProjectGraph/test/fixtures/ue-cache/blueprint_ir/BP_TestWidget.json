@@ -1,0 +1,148 @@
+{
+  "assetPath": "/Game/UI/BP_TestWidget.BP_TestWidget",
+  "blueprintName": "BP_TestWidget",
+  "parentClass": "/Script/UMG.UserWidget",
+  "generatedClass": "/Game/UI/BP_TestWidget.BP_TestWidget_C",
+  "implementedInterfaces": [],
+  "variables": [
+    {
+      "name": "TitleText",
+      "pinCategory": "text",
+      "defaultValue": "Hello",
+      "metadata": {
+        "ExposeOnSpawn": "true"
+      },
+      "isExposed": true
+    }
+  ],
+  "functions": [
+    {
+      "name": "Refresh",
+      "inputs": [
+        {
+          "name": "InTitle",
+          "direction": "Input",
+          "type": {
+            "category": "text"
+          },
+          "defaultValue": ""
+        }
+      ],
+      "outputs": [],
+      "localVariables": [
+        {
+          "name": "LocalVisible",
+          "pinCategory": "bool",
+          "defaultValue": "true"
+        }
+      ],
+      "nodes": [
+        {
+          "nodeGuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "nodeClass": "/Script/BlueprintGraph.K2Node_CallFunction",
+          "title": "SetText",
+          "functionReference": {
+            "kind": "function",
+            "path": "/Script/UMG.TextBlock.SetText"
+          },
+          "position": {
+            "x": 120,
+            "y": 48
+          },
+          "isPure": false,
+          "pins": [
+            {
+              "pinId": "11111111-2222-3333-4444-555555555555",
+              "name": "execute",
+              "direction": "Input",
+              "type": {
+                "category": "exec"
+              },
+              "defaultValue": "",
+              "connections": []
+            }
+          ]
+        }
+      ],
+      "executionLines": [],
+      "dataLines": []
+    }
+  ],
+  "macros": [
+    {
+      "name": "FormatTitle",
+      "inputs": [],
+      "outputs": [],
+      "localVariables": [],
+      "nodes": [],
+      "executionLines": [],
+      "dataLines": []
+    }
+  ],
+  "eventGraphs": [
+    {
+      "name": "EventGraph",
+      "nodes": [
+        {
+          "nodeGuid": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+          "nodeClass": "/Script/BlueprintGraph.K2Node_Event",
+          "title": "Event Construct",
+          "isPure": false,
+          "pins": [
+            {
+              "pinId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+              "name": "then",
+              "direction": "Output",
+              "type": {
+                "category": "exec"
+              },
+              "defaultValue": "",
+              "connections": [
+                {
+                  "nodeGuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                  "pinId": "11111111-2222-3333-4444-555555555555",
+                  "pinName": "execute"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "executionLines": [
+        {
+          "from": {
+            "nodeGuid": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+            "pinId": "66666666-7777-8888-9999-aaaaaaaaaaaa",
+            "pinName": "then"
+          },
+          "to": {
+            "nodeGuid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "pinId": "11111111-2222-3333-4444-555555555555",
+            "pinName": "execute"
+          },
+          "type": "execution"
+        }
+      ],
+      "dataLines": []
+    }
+  ],
+  "components": [
+    {
+      "name": "RootCanvas",
+      "componentClass": "/Script/UMG.CanvasPanel",
+      "attachParent": "",
+      "attachToName": "",
+      "defaultProperties": {
+        "Visibility": "Visible"
+      }
+    }
+  ],
+  "referencedAssets": [
+    "/Game/Materials/M_Test"
+  ],
+  "calledFunctions": [
+    {
+      "function": "/Script/UMG.Widget.SetVisibility"
+    }
+  ]
+}

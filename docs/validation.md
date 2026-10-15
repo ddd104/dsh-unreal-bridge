@@ -60,3 +60,12 @@ UE 插件新增至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。没有改动 `E
 - `npm run check` 成功，17 项测试通过；MCP 顶层工具和工具集调用在批准服务拒绝时仍能执行，且继续验证会话绑定、请求编号去重和不支持 MCP 的编辑器报错。
 - 蓝图补丁应用、撤销和保存仍使用原有 DSH 批准流程；UE MCP 层的脚本执行拦截与 `allowWrites` 写入开关未更改。
 - 对话指导明确优先使用蓝图默认对象及属性 MCP 工具查询类默认值，不生成 `.uasset` 解析脚本。
+
+## 2026-10-15 项目知识模块整合与 EHV 验证
+
+- 将原 AgentProjectGraph 的项目图谱、知识记忆和资产快照整合为 `DSHUnrealBridgeKnowledge` 编辑器模块，通过现有 DSH 会话提供 `unreal_knowledge` 与 `unreal_knowledge_record`；没有启动第二套 MCP 或 HTTP 服务。实时资产操作仍使用 UE MCP。
+- DSH 宿主 19 项测试、Node 知识工具 25 项测试、隔离 UE 工程知识模块 6 项测试通过；UE 5.8 `BuildPlugin` 编译与打包成功。
+- 已将插件源码及新编译的三个模块安装至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`，安装后二进制与编译包的 SHA-256 逐项一致。原 `AgentProjectGraph` 备份于 `F:\UE5Project\EHV\Saved\DSHUnrealBridgeBackups\20261015-184312-197\AgentProjectGraph`。
+- EHV 执行 `DSHUnrealBridge.Knowledge.ToolsMenuUpdate` 后，资产快照索引显示 `scanComplete=true`、`captureComplete=true`，覆盖 2,988/2,988 个资产，其中 32 个资产有未解析依赖。知识服务返回 `status=ready`、`needsUpdate=false`、`sourceFresh=true`、记忆 `fresh`；图谱有 19,710 个节点、36,907 条关系。测试日志位于 `.test-state/ehv-knowledge-update-release.log`。
+- 该项 EHV 自动化测试报告为 `Fail`：遍历资产时，工程现有蓝图缺失父类、函数和依赖，并输出大量编译错误，被 UE 自动化框架计入测试错误。进程正常退出，未再出现此前的节点工具提示断言；索引与知识状态已单独核实为完成。这项测试不能记录为通过。
+- 本次 EHV 验证只更新插件的生成缓存，没有保存或修改工程资产。DSH `desktop` 插件文件已同步；正在运行的 DSH 进程需要重启后才会加载新宿主代码。

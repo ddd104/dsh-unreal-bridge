@@ -5,7 +5,7 @@ import { mkdir, writeFile, readFile, unlink, appendFile, rename, stat } from 'no
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
-import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, catalogSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, fail, BridgeError } from './protocol.mjs';
+import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, catalogSchema, knowledgeSchema, knowledgeRecordSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, fail, BridgeError } from './protocol.mjs';
 
 export function defaultStateDir() {
   return process.platform==='win32' ? join(process.env.LOCALAPPDATA ?? join(homedir(),'AppData','Local'),'DSHUnrealBridge') : join(process.env.XDG_STATE_HOME ?? join(homedir(),'.local','state'),'dsh-unreal-bridge');
@@ -92,13 +92,15 @@ export class UnrealBridge extends EventEmitter {
       const cleanup=()=>options.signal?.removeEventListener('abort',abort);
       const finish=e=>{const p=this.pending.get(id);if(!p)return;this.pending.delete(id);clearTimeout(p.timer);cleanup();reject(e);};
       const abort=()=>finish(new BridgeError('CANCELLED','Request cancelled; editor may have already executed it',{requestId:id}));
-      const timer=setTimeout(()=>finish(new BridgeError('TIMEOUT','Editor response timed out; query request status before retrying',{requestId:id})),this.config.requestTimeoutMs); timer.unref();
+      const timer=setTimeout(()=>finish(new BridgeError('TIMEOUT','Editor response timed out; query request status before retrying',{requestId:id})),options.timeoutMs??this.config.requestTimeoutMs); timer.unref();
       this.pending.set(id,{editorId:editor.editorId,resolve,reject,timer,cleanup}); options.signal?.addEventListener('abort',abort,{once:true});
       editor.ws.send(JSON.stringify({type:'request',protocol:VERSION,id,method,params}),e=>{if(e)finish(new BridgeError('DISCONNECTED',e.message,{requestId:id}));});
     });
   }
   async read(sessionId,args,signal){return this.request(this.target(sessionId),'read_blueprint',readSchema.parse(args),{signal});}
   async catalog(sessionId,args={}){return this.request(this.target(sessionId),'catalog',catalogSchema.parse(args));}
+  async knowledge(sessionId,args,signal){const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.request(editor,'knowledge_call',knowledgeSchema.parse(args),{signal,timeoutMs:120000});}
+  async knowledgeRecord(sessionId,args,signal){const {tool,arguments:toolArgs,requestId}=knowledgeRecordSchema.parse(args);const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.mutate(sessionId,'knowledge_call',{tool,arguments:toolArgs},requestId,signal);}
   async mcpTools(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_list_tools',{}, {signal});}
   async mcpToolsets(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'list_toolsets',arguments:{}},{signal});}
   async mcpDescribe(sessionId,args,signal){const {toolsetName}=mcpDescribeSchema.parse(args);return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'describe_toolset',arguments:{toolset_name:toolsetName}},{signal});}

@@ -36,7 +36,7 @@ test('DSH tools require a session and actual approval before writing',async t=>{
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());const args={previewId:p.previewId,requestId:randomUUID()};
   assert.equal((await tools.get('unreal_state').execute({},{})).error.code,'SESSION_REQUIRED');
   assert.equal((await tools.get('unreal_apply').execute(args,exec)).error.code,'PERMISSION_DENIED');assert.equal(writes,0);approve=true;assert.equal((await tools.get('unreal_apply').execute(args,exec)).ok,true);assert.equal(writes,1);
-  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,15);
+  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,17);
 });
 
 test('UE MCP calls run without approval and stay in the bound editor with request IDs',async t=>{
@@ -75,4 +75,25 @@ test('UE MCP calls run without approval and stay in the bound editor with reques
 test('UE MCP calls reject editors without the capability',async t=>{
   const bridge=await fixture(t);await editor(bridge);bridge.bind('chat','UE1');
   await assert.rejects(bridge.mcpTools('chat'),{code:'MCP_UNAVAILABLE'});
+});
+
+test('project knowledge queries stay on the bound editor and require its capability',async t=>{
+  const bridge=await fixture(t);const calls=[];
+  await editor(bridge,'A',message=>{calls.push(['A',message]);return {status:'ready'};},['project_knowledge']);
+  await editor(bridge,'B',message=>{calls.push(['B',message]);return {status:'wrong'};},[]);
+  bridge.bind('chat','A');
+  assert.deepEqual(await bridge.knowledge('chat',{tool:'project_status',arguments:{}}),{status:'ready'});
+  assert.equal(calls.at(-1)[0],'A');assert.equal(calls.at(-1)[1].method,'knowledge_call');
+  bridge.bind('chat','B');await assert.rejects(bridge.knowledge('chat',{tool:'project_status',arguments:{}}),{code:'KNOWLEDGE_UNAVAILABLE'});
+  assert.equal(calls.length,1);
+});
+
+test('project knowledge records keep the same request ID when retried',async t=>{
+  const bridge=await fixture(t);let writes=0;
+  await editor(bridge,'UE1',message=>{if(message.method==='knowledge_call')writes++;return {saved:true};},['project_knowledge']);
+  bridge.bind('chat','UE1');
+  const args={tool:'remember_evidence',arguments:{summary:'Evidence',sources:[{path:'Source/A.cpp',hash:'a'.repeat(64)}]},requestId:randomUUID()};
+  assert.deepEqual(await bridge.knowledgeRecord('chat',args),{saved:true});
+  assert.deepEqual(await bridge.knowledgeRecord('chat',args),{saved:true});
+  assert.equal(writes,1);
 });

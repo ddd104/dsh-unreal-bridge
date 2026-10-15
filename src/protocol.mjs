@@ -24,6 +24,8 @@ export const mcpArguments = z.record(z.string(),z.json());
 export const mcpDescribeSchema = z.object({toolsetName:mcpToolName}).strict();
 export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
+export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();
+export const knowledgeRecordSchema = z.object({tool:z.enum(['remember_evidence','experience_save','experience_feedback']),arguments:mcpArguments,requestId:z.string().uuid()}).strict();
 export const helloSchema = z.object({type:z.literal('hello'), protocol:z.literal(VERSION), editorId:id, project:z.string().min(1).max(512), projectPath:z.string().max(2048), engineVersion:z.string().max(80), pid:z.number().int().positive(), capabilities:z.array(id).max(64)}).strict();
 export const selectionSchema = z.object({assets:z.array(z.object({path:z.string().max(1024), class:z.string().max(256)}).strict()).max(256)}).strict();
 

@@ -1,0 +1,18 @@
+{
+  "name": "ue-project-knowledge-tools",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "ProjectGraph",
+    "ProjectMemorySystem"
+  ],
+  "scripts": {
+    "build": "\"..\\Runtime\\Win64\\node.exe\" build.mjs",
+    "test": "\"..\\Runtime\\Win64\\node.exe\" test.mjs",
+    "worker": "\"..\\Runtime\\Win64\\node.exe\" knowledge-worker.mjs"
+  },
+  "engines": {
+    "node": ">=24.15.0 <25"
+  }
+}
