@@ -14,5 +14,12 @@
   },
   "engines": {
     "node": ">=24.15.0 <25"
+  },
+  "dependencies": {
+    "@e965/xlsx": "^0.20.3",
+    "protobufjs": "^8.8.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   }
 }

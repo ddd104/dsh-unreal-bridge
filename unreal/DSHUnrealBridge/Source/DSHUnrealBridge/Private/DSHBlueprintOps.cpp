@@ -137,7 +137,7 @@ bool FDSHBlueprintOps::Compile(UBlueprint* BP,FString& Error)
     return true;
 }
 
-bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObject>& Params,FString& Error)
+bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObject>& Params,FString& Error,FDSHAssetViewHint* ViewHint)
 {
     UEdGraph* Graph=GraphOf(BP,Str(Params,TEXT("graph")));
     if(!Graph||!Graph->GetSchema()->IsA<UEdGraphSchema_K2>()) {Error=TEXT("A valid K2 graph name or graph GUID is required");return false;}
@@ -145,6 +145,13 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
     if(!Params->TryGetArrayField(TEXT("operations"),Ops)||Ops->Num()<1||Ops->Num()>100) {Error=TEXT("operations must contain 1..100 operations");return false;}
     TMap<FString,UEdGraphNode*> Nodes; for(UEdGraphNode* N:Graph->Nodes)if(N)Nodes.Add(N->NodeGuid.ToString(),N);
     BP->Modify(); Graph->Modify(); for(UEdGraphNode* N:Graph->Nodes)if(N)N->Modify();
+    TArray<FVector2D> EditedPositions;
+    auto MarkNode=[&](UEdGraphNode* Node,bool bSurvives=true)
+    {
+        if(!ViewHint||!Node)return;
+        EditedPositions.Add(FVector2D(Node->NodePosX,Node->NodePosY));
+        if(bSurvives)ViewHint->NodeIds.AddUnique(Node->NodeGuid.ToString());
+    };
     for(const auto& Entry:*Ops)
     {
         const TSharedPtr<FJsonObject>* OpPtr=nullptr;if(!Entry->TryGetObject(OpPtr)){Error=TEXT("Operation must be an object");return false;} const auto Op=*OpPtr;
@@ -168,6 +175,7 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
             }
             else{Error=TEXT("Node kind and function are incompatible");return false;}
             Graph->AddNode(N,false,false);N->CreateNewGuid();N->PostPlacedNewNode();N->AllocateDefaultPins();Nodes.Add(NodeId,N);
+            // Position is applied by the common position block below.
         }
         else if(Kind==TEXT("connect")||Kind==TEXT("disconnect"))
         {
@@ -184,12 +192,13 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
                 if(!Graph->GetSchema()->TryCreateConnection(AP,BPIn)){Error=TEXT("Could not connect pins");return false;}
             }
             else Graph->GetSchema()->BreakSinglePinLink(AP,BPIn);
+            MarkNode(AN);MarkNode(BN);
             continue;
         }
         else if(!N){Error=TEXT("Node ID not found");return false;}
         else if(Kind==TEXT("remove_node"))
         {
-            if(!N->CanUserDeleteNode()){Error=TEXT("Node cannot be deleted");return false;}FBlueprintEditorUtils::RemoveNode(BP,N,true);Nodes.Remove(NodeId);continue;
+            if(!N->CanUserDeleteNode()){Error=TEXT("Node cannot be deleted");return false;}MarkNode(N,false);FBlueprintEditorUtils::RemoveNode(BP,N,true);Nodes.Remove(NodeId);continue;
         }
         else if(Kind==TEXT("set_pin_default"))
         {
@@ -198,7 +207,7 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
             if(P->PinType.PinCategory==UEdGraphSchema_K2::PC_Object||P->PinType.PinCategory==UEdGraphSchema_K2::PC_Class||P->PinType.PinCategory==UEdGraphSchema_K2::PC_Text){Error=TEXT("Object, class and localized text defaults are not supported in this release");return false;}
             const FString Value=Str(Op,TEXT("value"));if(Value.Len()>8192){Error=TEXT("Pin value is too large");return false;}
             const FString Validation=Graph->GetSchema()->IsPinDefaultValid(P,Value,nullptr,FText::GetEmpty());if(!Validation.IsEmpty()){Error=Validation;return false;}
-            Graph->GetSchema()->TrySetDefaultValue(*P,Value);continue;
+            Graph->GetSchema()->TrySetDefaultValue(*P,Value);MarkNode(N);continue;
         }
         else if(Kind!=TEXT("move_node")){Error=TEXT("Unsupported operation");return false;}
         const TSharedPtr<FJsonObject>* Position=nullptr;
@@ -207,11 +216,22 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
             double X=0,Y=0;if(!(*Position)->TryGetNumberField(TEXT("x"),X)||!(*Position)->TryGetNumberField(TEXT("y"),Y)||!FMath::IsFinite(X)||!FMath::IsFinite(Y)||FMath::Abs(X)>100000||FMath::Abs(Y)>100000){Error=TEXT("Invalid node coordinates");return false;}
             N->NodePosX=static_cast<int32>(X);N->NodePosY=static_cast<int32>(Y);
         }
+        MarkNode(N);
+    }
+    if(ViewHint)
+    {
+        ViewHint->AssetPath=BP->GetPathName();ViewHint->Graph=Graph->GraphGuid.ToString();
+        if(!EditedPositions.IsEmpty())
+        {
+            FVector2D Min=EditedPositions[0],Max=Min;
+            for(const FVector2D& Point:EditedPositions){Min.X=FMath::Min(Min.X,Point.X);Min.Y=FMath::Min(Min.Y,Point.Y);Max.X=FMath::Max(Max.X,Point.X);Max.Y=FMath::Max(Max.Y,Point.Y);}
+            ViewHint->Center=(Min+Max)*0.5;
+        }
     }
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);Graph->NotifyGraphChanged();return true;
 }
 
-TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TSharedPtr<FJsonObject>& Params,FString& ErrorCode,FString& ErrorMessage)
+TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TSharedPtr<FJsonObject>& Params,FString& ErrorCode,FString& ErrorMessage,FDSHAssetViewHint* ViewHint)
 {
     check(IsInGameThread());ErrorCode=TEXT("INVALID_REQUEST");
     if(Method==TEXT("catalog"))
@@ -255,7 +275,7 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TS
         UBlueprint* BP=FKismetEditorUtilities::CreateBlueprint(ParentClass,Package,FName(*FPackageName::GetShortName(PackageName)),BPTYPE_Normal,UBlueprint::StaticClass(),UBlueprintGeneratedClass::StaticClass(),TEXT("DSHBridge"));
         if(!BP){ErrorMessage=TEXT("Blueprint creation failed");return nullptr;}
         if(!Compile(BP,ErrorMessage)){BP->ClearFlags(RF_Public|RF_Standalone);BP->Rename(nullptr,GetTransientPackage(),REN_DontCreateRedirectors|REN_NonTransactional);Package->SetDirtyFlag(false);ErrorCode=TEXT("COMPILE_FAILED");return nullptr;}
-        FAssetRegistryModule::AssetCreated(BP);BP->MarkPackageDirty();auto O=Read(BP,MakeShared<FJsonObject>());O->SetBoolField(TEXT("saved"),false);return O;
+        FAssetRegistryModule::AssetCreated(BP);BP->MarkPackageDirty();auto O=Read(BP,MakeShared<FJsonObject>());O->SetBoolField(TEXT("saved"),false);if(ViewHint)ViewHint->AssetPath=BP->GetPathName();return O;
     }
     UBlueprint* BP=Resolve(Path,ErrorMessage);if(!BP)return nullptr;
     if(Method==TEXT("read_blueprint"))
@@ -271,7 +291,7 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TS
         if(!Copy.IsValid()||!ApplyOperations(Copy.Get(),Params,ErrorMessage)||!Compile(Copy.Get(),ErrorMessage)){ErrorCode=TEXT("VALIDATION_FAILED");return nullptr;}
         if(Method==TEXT("preview_patch")){auto O=Obj();O->SetBoolField(TEXT("valid"),true);O->SetStringField(TEXT("assetPath"),BP->GetPathName());O->SetStringField(TEXT("baseRevision"),Base);O->SetStringField(TEXT("message"),TEXT("Validated and compiled on a transient copy"));return O;}
         const FString Label=TEXT("DSH Blueprint Edit ")+FGuid::NewGuid().ToString();bool Success=false;
-        {FScopedTransaction Tx(TEXT("DSHUnrealBridge"),FText::FromString(Label),BP);Success=ApplyOperations(BP,Params,ErrorMessage)&&Compile(BP,ErrorMessage);}
+        {FScopedTransaction Tx(TEXT("DSHUnrealBridge"),FText::FromString(Label),BP);Success=ApplyOperations(BP,Params,ErrorMessage,ViewHint)&&Compile(BP,ErrorMessage);}
         const auto Context=GEditor->Trans->GetUndoContext();
         if(!Success)
         {
@@ -286,7 +306,7 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TS
         const FGuid* Transaction=UndoTransactions.Find(BP->GetPathName());const FString* RevisionAfter=UndoRevisions.Find(BP->GetPathName());
         if(!Transaction||!RevisionAfter||*RevisionAfter!=Base||GEditor->Trans->GetUndoContext().TransactionId!=*Transaction){ErrorCode=TEXT("UNDO_NOT_LATEST");ErrorMessage=TEXT("The bridge edit is no longer the latest editor transaction; use the editor undo history");return nullptr;}
         if(!GEditor->UndoTransaction()){ErrorMessage=TEXT("Editor refused undo");return nullptr;}UndoTransactions.Remove(BP->GetPathName());UndoRevisions.Remove(BP->GetPathName());
-        if(!Compile(BP,ErrorMessage)){ErrorCode=TEXT("UNDO_COMPILE_FAILED");return nullptr;}return Read(BP,Params);
+        if(!Compile(BP,ErrorMessage)){ErrorCode=TEXT("UNDO_COMPILE_FAILED");return nullptr;}if(ViewHint)ViewHint->AssetPath=BP->GetPathName();return Read(BP,Params);
     }
     if(Method==TEXT("save"))
     {

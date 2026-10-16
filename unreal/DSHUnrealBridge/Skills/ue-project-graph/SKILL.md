@@ -17,7 +17,7 @@ Use the project's own instructions first. Treat indexed graph nodes and memory s
 
 Read `project_status` before relying on stored context. Verify that the `.uproject` identity matches, source hashes are current, and warnings or coverage limits are understood. An absent or stale hit does not show that a feature is absent.
 
-Keep authored project facts in a project documentation directory such as `ProjectKnowledge/`; keep generated graph, memory, and asset snapshots in the plugin cache. The configured documentation roots and supported formats determine what is indexed. This package reads text, Markdown, JSON, CSV, YAML, INI, protobuf schemas, DOCX, and XLSX; PDF and legacy XLS need conversion before indexing.
+Keep authored project facts in a project documentation directory such as `ProjectKnowledge/`; keep generated graph, memory, and asset snapshots in the plugin cache. The configured documentation roots and supported formats determine what is indexed. This package reads text, Markdown, JSON, CSV, YAML, INI, protobuf schemas, DOCX, XLSX, and legacy XLS. Proto messages, fields, enums, and RPCs are indexed with their source text; XLS sheet names and cell values are indexed. PDF needs conversion before indexing.
 
 When the index needs an update, use the editor's **更新项目图谱与知识记忆** command. It captures registered assets before rebuilding graph and memory. Rebuild only when the task needs fresh project-wide context; normal queries should not trigger full scans.
 

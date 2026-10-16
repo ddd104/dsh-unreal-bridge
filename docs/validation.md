@@ -69,3 +69,11 @@ UE 插件新增至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。没有改动 `E
 - EHV 执行 `DSHUnrealBridge.Knowledge.ToolsMenuUpdate` 后，资产快照索引显示 `scanComplete=true`、`captureComplete=true`，覆盖 2,988/2,988 个资产，其中 32 个资产有未解析依赖。知识服务返回 `status=ready`、`needsUpdate=false`、`sourceFresh=true`、记忆 `fresh`；图谱有 19,710 个节点、36,907 条关系。测试日志位于 `.test-state/ehv-knowledge-update-release.log`。
 - 该项 EHV 自动化测试报告为 `Fail`：遍历资产时，工程现有蓝图缺失父类、函数和依赖，并输出大量编译错误，被 UE 自动化框架计入测试错误。进程正常退出，未再出现此前的节点工具提示断言；索引与知识状态已单独核实为完成。这项测试不能记录为通过。
 - 本次 EHV 验证只更新插件的生成缓存，没有保存或修改工程资产。DSH `desktop` 插件文件已同步；正在运行的 DSH 进程需要重启后才会加载新宿主代码。
+
+## 2026-10-15 修改后展示增量验证
+
+- `npm run check` 成功，20 项 JavaScript 测试通过，包括手动定位工具的会话绑定与旧版编辑器能力检查。
+- UE 5.8 中三个插件模块编译、链接成功；隔离 HostProject 的蓝图回合、MCP 展示目标解析和输入拒绝自动化测试通过。
+- 同一隔离工程的图形编辑器测试通过：蓝图资产打开、窗口最大化并切换到目标图；材质资产打开、窗口最大化并执行表达式定位。
+- 真实桥接端到端测试通过 8 项，覆盖创建、图补丁、手动定位请求、撤销、保存及重连。无界面命令行编辑器跳过窗口展示，避免在自动化进程中打开 Slate 编辑器。
+- 本次修改保留在工作区及隔离测试工程，未同步至 EHV 或已安装的 DSH 插件。

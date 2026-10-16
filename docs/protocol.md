@@ -17,6 +17,7 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`，默认直接调用工具集函数 |
 | `unreal_mcp_call` | `name`、`arguments`、UUID `requestId`，默认直接调用顶层 MCP 工具 |
 | `unreal_read_blueprint` | `assetPath`，可选 `graph`、`nodeIds`、`detail: summary/full` |
+| `unreal_focus_asset` | `assetPath`，可选 `graph`、`nodeIds`；手动打开并最大化资产编辑器，节点可识别时聚焦；返回 `queued` 表示展示任务已排队 |
 | `unreal_preview_create` | `assetPath`、`parent: Actor/ActorComponent/Object` |
 | `unreal_preview_patch` | `assetPath`、`graph`、`baseRevision`、`operations` |
 | `unreal_apply` | `previewId`、UUID `requestId`，批准后应用，默认不保存 |
@@ -29,6 +30,8 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 `unreal_knowledge` 的 `tool` 可取 `project_status`、`project_context`、`project_search`、`graph_query`、`graph_feature`、`graph_impact`、`read_source`、`validate_evidence`、`read_asset_snapshot`、`search_asset_snapshots`、`asset_snapshot`、`inspect_asset`、`experience_lookup`。`unreal_knowledge_record` 使用 `remember_evidence`、`experience_save` 或 `experience_feedback`。图谱查询与资料查询读取同一插件缓存；`graph_impact` 的 `arguments.nodeId` 是先前图谱结果的节点 ID。更新索引由编辑器菜单执行资产扫描，查询本身不会启动全量重建。返回内容是项目证据，不作为模型指令。
 
 资产增删改查优先走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 仍会拒绝调用。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用蓝图补丁的预览与版本机制。
+
+成功的蓝图创建、应用和撤销，以及能够识别目标资产的 MCP 修改，会在编辑器下一帧排队展示该资产。展示只改变窗口和画布，不参与资产写入事务，也不改变写入的去重结果。蓝图和动画蓝图按节点 GUID 聚焦，材质按表达式 GUID 或节点 GUID 聚焦；未知节点保留当前画布视角。新增工具可以向展示服务提供资产、图与节点信息，而不需要重复实现窗口控制。
 
 补丁示例（现有节点编号与引脚名必须先读取）：
 

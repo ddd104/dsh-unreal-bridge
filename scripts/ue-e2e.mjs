@@ -29,9 +29,10 @@ try{
   const applied=await bridge.apply('e2e',preview.previewId,randomUUID());assert.equal(applied.compiled,true);
   const after=await bridge.read('e2e',{assetPath,detail:'full'});const print=after.graphs.flatMap(g=>g.nodes??[]).find(n=>n.functionPath==='/Script/Engine.KismetSystemLibrary:PrintString');assert.equal(print.pins.find(p=>p.name==='InString').defaultValue,'Hello from DSH integration test');assert.ok(print.pins.find(p=>p.name==='execute').links.length);
   console.log('PASS: create, preview, connected graph patch, compile and read-back');
+  assert.deepEqual(await bridge.focus('e2e',{assetPath,graph:graph.name,nodeIds:[print.id]}),{queued:true});console.log('PASS: asset focus request reaches the bound editor');
   await assert.rejects(bridge.request(bridge.target('e2e'),'apply_patch',params,{id:randomUUID()}),{code:'CONFLICT'});console.log('PASS: editor-side stale revision rejection');
   const undone=await bridge.mutate('e2e','undo',{assetPath,baseRevision:after.revision},randomUUID());assert.equal(undone.revision,original.revision);console.log('PASS: owned editor undo restores blueprint');
   const saved=await bridge.mutate('e2e','save',{assetPath,baseRevision:undone.revision},randomUUID());assert.equal(saved.saved,true);console.log('PASS: explicit save in disposable project');
   const socket=bridge.target('e2e').ws;const close=once(socket,'close');socket.terminate();await close;const reconnectDeadline=Date.now()+15000;while(!bridge.state('e2e').connected){if(Date.now()>reconnectDeadline)throw new Error('Reconnect timed out');await new Promise(r=>setTimeout(r,100));}console.log('PASS: editor reconnect keeps conversation binding');
-  console.log(JSON.stringify({status:'passed',engine:instance.engineVersion,tests:7}));
+  console.log(JSON.stringify({status:'passed',engine:instance.engineVersion,tests:8}));
 }finally{child.kill();await bridge.close();}

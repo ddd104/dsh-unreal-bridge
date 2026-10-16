@@ -85,7 +85,7 @@ function configuredExcludePatterns(config: ProjectMemoryConfig): string[] {
 function configuredExtensions(config: ProjectMemoryConfig, registry: SourceRegistry): Set<string> {
   const requested = config.sourcePolicy?.includeExtensions?.map((extension) => extension.toLowerCase()) ?? [];
   const registered = new Set(registry.list().flatMap((provider) => provider.extensions));
-  const defaults = [".md", ".txt", ".proto", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml", ".ini", ".xlsx", ".docx"];
+  const defaults = [".md", ".txt", ".proto", ".json", ".jsonl", ".csv", ".tsv", ".yaml", ".yml", ".ini", ".xls", ".xlsx", ".docx"];
   return new Set((requested.length > 0 ? requested : defaults).filter((extension) => registered.has(extension)));
 }
 

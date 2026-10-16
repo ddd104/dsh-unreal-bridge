@@ -1,7 +1,7 @@
 import { createSourceProvider } from "./sourceRegistry.js";
 
 export const textSource = {
-  ...createSourceProvider("text", "Plain text and protobuf schema", [".txt", ".proto"]),
+  ...createSourceProvider("text", "Plain text", [".txt"]),
   parse: async (_filePath: string, content: Buffer) => {
     const text = content.toString("utf8");
     const title = text

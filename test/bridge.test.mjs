@@ -36,7 +36,18 @@ test('DSH tools require a session and actual approval before writing',async t=>{
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());const args={previewId:p.previewId,requestId:randomUUID()};
   assert.equal((await tools.get('unreal_state').execute({},{})).error.code,'SESSION_REQUIRED');
   assert.equal((await tools.get('unreal_apply').execute(args,exec)).error.code,'PERMISSION_DENIED');assert.equal(writes,0);approve=true;assert.equal((await tools.get('unreal_apply').execute(args,exec)).ok,true);assert.equal(writes,1);
-  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,17);
+  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,18);
+});
+
+test('asset focus stays in the bound editor and rejects older plugins',async t=>{
+  const b=await fixture(t);const calls=[];
+  await editor(b,'A',m=>{calls.push({editor:'A',method:m.method,params:m.params});return{queued:true};},['focus_asset']);
+  await editor(b,'B',m=>{calls.push({editor:'B',method:m.method});return{queued:true};});
+  b.bind('chat','A');
+  assert.deepEqual(await b.focus('chat',{assetPath:'/Game/BP_Test',graph:'EventGraph',nodeIds:['node-1']}),{queued:true});
+  assert.deepEqual(calls,[{editor:'A',method:'focus_asset',params:{assetPath:'/Game/BP_Test',graph:'EventGraph',nodeIds:['node-1']}}]);
+  b.bind('chat','B');
+  await assert.rejects(b.focus('chat',{assetPath:'/Game/BP_Test'}),{code:'FOCUS_UNAVAILABLE'});
 });
 
 test('UE MCP calls run without approval and stay in the bound editor with request IDs',async t=>{

@@ -34,6 +34,7 @@
       ".yaml",
       ".yml",
       ".ini",
+      ".xls",
       ".xlsx",
       ".docx"
     ],

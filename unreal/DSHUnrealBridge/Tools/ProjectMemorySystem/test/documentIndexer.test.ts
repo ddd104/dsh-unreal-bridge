@@ -91,9 +91,42 @@ test("protobuf schema files become searchable project documents", async () => {
   const config = JSON.parse(await readFile(configPath, "utf8"));
   config.sourcePolicy.includeExtensions.push(".proto");
   await writeFile(configPath, JSON.stringify(config), "utf8");
-  await writeFile(path.join(projectRoot, "ProjectKnowledge", "route.proto"), "message RouteTelemetry { string road_segment_name = 1; }", "utf8");
+  await writeFile(path.join(projectRoot, "ProjectKnowledge", "route.proto"), [
+    'syntax = "proto3";',
+    "package ehv.route;",
+    "message RouteTelemetry { string road_segment_name = 1; }",
+    "enum RouteMode { ROUTE_UNKNOWN = 0; ROUTE_READY = 1; }",
+    "service Router { rpc Resolve (RouteTelemetry) returns (RouteTelemetry); }"
+  ].join("\n"), "utf8");
   await buildMemory({ projectRoot, docsOnly: true });
   const result = await queryMemory("RouteTelemetry", { projectRoot });
   const data = result.data as { results: Array<{ path: string }> };
   assert.ok(data.results.some((item) => item.path.endsWith("ProjectKnowledge/route.proto")));
+  const documents = (await readFile(path.join(projectRoot, ".ai/project-memory/index/documents.jsonl"), "utf8"))
+    .trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  const document = documents.find((item) => item.path.endsWith("ProjectKnowledge/route.proto"));
+  assert.equal(document.sourceType, "proto");
+  assert.deepEqual(document.metadata.messages, ["ehv.route.RouteTelemetry"]);
+  assert.deepEqual(document.metadata.enums, ["ehv.route.RouteMode"]);
+  assert.deepEqual(document.metadata.services, ["ehv.route.Router"]);
+  assert.match(document.text, /rpc Resolve \(RouteTelemetry\) returns \(RouteTelemetry\)/);
+  assert.match(document.text, /1: string road_segment_name/);
+});
+
+test("legacy XLS worksheets become searchable project documents", async () => {
+  const projectRoot = await createFixtureProject();
+  const configPath = path.join(projectRoot, "AgentTools/ProjectMemorySystem/ProjectMemory.project.json");
+  const config = JSON.parse(await readFile(configPath, "utf8"));
+  config.sourcePolicy.includeExtensions.push(".xls");
+  await writeFile(configPath, JSON.stringify(config), "utf8");
+  await buildMemory({ projectRoot, docsOnly: true });
+  const result = await queryMemory("legacy-marker", { projectRoot });
+  const data = result.data as { results: Array<{ path: string }> };
+  assert.ok(data.results.some((item) => item.path.endsWith("ProjectKnowledge/sample.xls")));
+  const documents = (await readFile(path.join(projectRoot, ".ai/project-memory/index/documents.jsonl"), "utf8"))
+    .trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  const document = documents.find((item) => item.path.endsWith("ProjectKnowledge/sample.xls"));
+  assert.equal(document.sourceType, "xls");
+  assert.deepEqual(document.metadata.sheetNames, ["Legacy"]);
+  assert.match(document.text, /legacy-marker\t42/);
 });

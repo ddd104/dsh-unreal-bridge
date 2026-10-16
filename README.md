@@ -36,7 +36,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 
 `DSHUnrealBridgeKnowledge` 是同一个 UE 插件中的编辑器模块。它从源码、配置、项目资料和 UE 资产快照生成图谱与记忆。Agent 使用已绑定编辑器上的 `unreal_knowledge` 查询 `project_status`、`project_context`、`project_search`、`graph_query`、`graph_feature`、`graph_impact`、`read_source` 和分页资产快照；需要保留带来源的结论时，用 `unreal_knowledge_record` 保存。它不启动独立的 Graph/Memory MCP 服务，也不开放旧的固定端口 HTTP 服务；实时资产修改继续走 UE MCP。
 
-把人工维护的项目说明放在工程的 `ProjectKnowledge/`、`Docs/` 等目录；生成的索引、记忆与快照在 `Plugins/DSHUnrealBridge/Cache/`。插件配置在 `Config/Knowledge/ProjectMemory.project.json`，支持文本、Markdown、JSON、CSV、YAML、INI、`.proto`、DOCX 和 XLSX。PDF 与旧 `.xls` 需先转为受支持格式。需要新鲜的全项目知识时，在 UE 编辑器菜单中执行“更新项目图谱与知识记忆”。常规查询不会自动重建；图谱命中与记忆摘要应由当前源码和编辑器状态核实。
+把人工维护的项目说明放在工程的 `ProjectKnowledge/`、`Docs/` 等目录；生成的索引、记忆与快照在 `Plugins/DSHUnrealBridge/Cache/`。插件配置在 `Config/Knowledge/ProjectMemory.project.json`，支持文本、Markdown、JSON、CSV、YAML、INI、DOCX、XLSX、旧版 XLS，以及 `.proto`。`.proto` 会提取消息、字段、枚举和 RPC，保留原文；`.xls` 会提取工作表名称与单元格内容。PDF 仍需先转为受支持格式。需要新鲜的全项目知识时，在 UE 编辑器菜单中执行“更新项目图谱与知识记忆”。常规查询不会自动重建；图谱命中与记忆摘要应由当前源码和编辑器状态核实。
 
 安装脚本发现旧 `AgentProjectGraph/Cache` 时，会复制其 UE 快照及证据到新插件缓存，再把旧插件移入工程的 `Saved/DSHUnrealBridgeBackups/`，避免旧菜单与 HTTP 服务继续加载。旧图谱和记忆不会直接复用；在编辑器中更新一次即可按新路径重建。
 
@@ -54,6 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 | 函数目录 | 搜索已加载的原生 BlueprintCallable / BlueprintEvent 函数及其引脚 |
 | 创建 | 新建 Actor、ActorComponent、Object 普通蓝图，拒绝覆盖现有资产 |
 | 节点修改 | 添加原生函数/事件节点、删除、移动、设置输入默认值、连接/断开 |
+| 修改后展示 | 成功创建或修改资产后自动打开并最大化编辑器窗口；蓝图、动画蓝图和材质在可识别节点时聚焦修改区域；`unreal_focus_asset` 可手动重新打开和定位 |
 | 预览与编译 | 临时副本验证补丁并编译，原资产不变；实际执行再次检查版本 |
 | 冲突、撤销与保存 | 版本变化拒绝提交；仅撤销仍位于撤销栈顶部的插件图修改；显式编译并保存 |
 | 连接可靠性 | 自动重连、心跳、请求超时、请求编号去重、未知结果查询 |
@@ -63,6 +64,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 
 - 本插件自带的蓝图图操作仅支持普通 `UBlueprint` 和 `/Game/` 资产。其他资产操作由当前 UE 5.8 实例实际注册的 MCP 工具集决定；可先发现工具与参数，不承诺每一种资产类型都有对应的工具。
 - MCP 工具可能立即保存、移动或删除资产，默认直接执行；这些工具不使用本插件的蓝图预览与版本校验。`ProgrammaticToolset` 等脚本执行入口被桥接层禁用。
+- 展示行为由编辑器内统一服务执行，不改变资产写入结果。MCP 工具只有在成功返回且提供可识别的目标资产路径时才会自动展示；无法识别节点时打开资产并保留当前画布视角。删除后的资产无法打开。停靠的资产标签页会激活并最大化所在 UE 窗口，不强制弹出独立窗口。
 - 原生函数必须已加载且对蓝图公开；废弃和内部函数被过滤。事件必须适用于资产父类。引脚连接不隐式拆线或增加转换节点。
 - 默认值不支持对象、类及本地化文本引用。每次补丁最多 100 个操作。响应上限 2 MiB；较大图应按图/节点筛选读取。
 - 冲突采用拒绝并重新读取/预览；没有自动三方合并、任意历史版本回滚或跨进程持久化撤销。创建新资产不提供插件删除工具。

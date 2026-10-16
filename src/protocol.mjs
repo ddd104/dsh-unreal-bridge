@@ -18,6 +18,7 @@ export const operation = z.discriminatedUnion('op', [
 export const patchSchema = z.object({assetPath, graph:id, baseRevision:id, operations:z.array(operation).min(1).max(100)}).strict();
 export const createSchema = z.object({assetPath, parent:z.enum(['Actor','ActorComponent','Object']).default('Actor')}).strict();
 export const readSchema = z.object({assetPath, graph:id.optional(), nodeIds:z.array(id).max(50).optional(), detail:z.enum(['summary','full']).default('summary')}).strict();
+export const focusSchema = z.object({assetPath:z.string().max(512).regex(/^\/[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)+(?:\.[A-Za-z0-9_]+)?$/), graph:id.optional(), nodeIds:z.array(id).max(50).optional()}).strict();
 export const catalogSchema = z.object({query:z.string().max(100).optional(),limit:z.number().int().min(1).max(50).default(20)}).strict();
 export const mcpToolName = z.string().min(1).max(160).regex(/^[A-Za-z0-9_.-]+$/);
 export const mcpArguments = z.record(z.string(),z.json());

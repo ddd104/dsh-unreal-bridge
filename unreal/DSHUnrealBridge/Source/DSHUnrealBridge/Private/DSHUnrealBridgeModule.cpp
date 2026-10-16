@@ -1,5 +1,7 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
+#include "DSHAssetPresentation.h"
+#include "DSHMcpEditAdapter.h"
 #include "IDSHUnrealBridgeMCPModule.h"
 #include "ProjectKnowledgeService.h"
 #include "AssetRegistry/AssetData.h"
@@ -86,6 +88,7 @@ private:
     TMap<TWeakObjectPtr<UBlueprint>,FString> Watched;
     TSet<TWeakObjectPtr<UBlueprint>> Dirty;
     FDSHBlueprintOps Operations;
+    FDSHAssetPresentation Presentation;
     void Send(const TSharedPtr<FJsonObject>& O){if(Socket&&Socket->IsConnected())Socket->Send(Encode(O));}
     void Event(const FString& Name,const TSharedPtr<FJsonObject>& Data){if(!bAuthenticated)return;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("event"));O->SetStringField(TEXT("event"),Name);O->SetNumberField(TEXT("sequence"),++Sequence);O->SetObjectField(TEXT("data"),Data);Send(O);}
     void SendSelection(){auto Data=MakeShared<FJsonObject>();Data->SetArrayField(TEXT("assets"),Selection);Event(TEXT("selection_changed"),Data);}
@@ -115,7 +118,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message)
     {
@@ -143,6 +146,16 @@ private:
         if(Method==TEXT("request_status"))
         {
             const FString QueryId=Field(Params,TEXT("requestId"));auto R=MakeShared<FJsonObject>();auto Result=MakeShared<FJsonObject>();Result->SetStringField(TEXT("status"),Results.Contains(QueryId)?TEXT("completed"):PendingMcp.Contains(QueryId)||PendingKnowledge.Contains(QueryId)?TEXT("pending"):RequestHashes.Contains(QueryId)?TEXT("expired"):TEXT("unknown"));if(Results.Contains(QueryId))Result->SetObjectField(TEXT("response"),Results[QueryId]);R->SetStringField(TEXT("type"),TEXT("response"));R->SetStringField(TEXT("id"),Id);R->SetBoolField(TEXT("ok"),true);R->SetObjectField(TEXT("result"),Result);Send(R);return;
+        }
+        if(Method==TEXT("focus_asset"))
+        {
+            FDSHAssetViewHint Hint;
+            Hint.AssetPath=Field(Params,TEXT("assetPath"));Hint.Graph=Field(Params,TEXT("graph"));
+            const TArray<TSharedPtr<FJsonValue>>* NodeIds=nullptr;
+            if(Params->TryGetArrayField(TEXT("nodeIds"),NodeIds))for(const auto& Node:*NodeIds)if(Node.IsValid()&&Node->Type==EJson::String)Hint.NodeIds.Add(Node->AsString());
+            Presentation.Queue(Hint);
+            auto Result=MakeShared<FJsonObject>();Result->SetBoolField(TEXT("queued"),true);
+            auto Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);Send(Response);return;
         }
         const FString KnowledgeTool=Method==TEXT("knowledge_call")?Field(Params,TEXT("tool")):FString();
         const bool bKnowledgeWrite=KnowledgeTool==TEXT("remember_evidence")||KnowledgeTool==TEXT("experience_save")||KnowledgeTool==TEXT("experience_feedback");
@@ -206,24 +219,30 @@ private:
             PendingMcp.Add(Id);
             const TWeakPtr<FDSHConnection> Weak=AsShared();
             FString MCPError;
-            const bool bStarted=IDSHUnrealBridgeMCPModule::Get().CallTool(Name,*ArgumentsPtr,Id,
-                [Weak,Id,bWrite](TSharedPtr<FJsonObject> Result)
+            const TSharedPtr<FJsonObject> ToolArguments=*ArgumentsPtr;
+            const bool bStarted=IDSHUnrealBridgeMCPModule::Get().CallTool(Name,ToolArguments,Id,
+                [Weak,Id,bWrite,Name,ToolArguments](TSharedPtr<FJsonObject> Result)
                 {
-                    auto Finish=[Weak,Id,bWrite,Result]()
+                    auto Finish=[Weak,Id,bWrite,Result,Name,ToolArguments]()
                     {
-                        if(auto Self=Weak.Pin())Self->CompleteMcp(Id,Result,TEXT("MCP_TOOL_ERROR"),TEXT("MCP tool returned no result"),bWrite);
+                        if(auto Self=Weak.Pin())
+                        {
+                            for(const FDSHAssetViewHint& Hint:FDSHMcpEditAdapter::FromCall(Name,ToolArguments,Result))Self->Presentation.Queue(Hint);
+                            Self->CompleteMcp(Id,Result,TEXT("MCP_TOOL_ERROR"),TEXT("MCP tool returned no result"),bWrite);
+                        }
                     };
                     if(IsInGameThread())Finish();else AsyncTask(ENamedThreads::GameThread,MoveTemp(Finish));
                 },MCPError);
             if(!bStarted)CompleteMcp(Id,nullptr,TEXT("MCP_UNAVAILABLE"),MCPError,bWrite);
             return;
         }
-        FString Code,MessageText;auto Result=Operations.Execute(Method,Params,Code,MessageText);TSharedPtr<FJsonObject> Response;
+        FString Code,MessageText;FDSHAssetViewHint ViewHint;auto Result=Operations.Execute(Method,Params,Code,MessageText,&ViewHint);TSharedPtr<FJsonObject> Response;
         if(Result){Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
         else Response=Error(Id,Code,MessageText);
         if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("Read a summary or filter by graph and nodeIds; response exceeds 2 MiB"));
         if(bWrite){Results.Add(Id,Response);ResultOrder.Add(Id);if(ResultOrder.Num()>1024){Results.Remove(ResultOrder[0]);ResultOrder.RemoveAt(0);}}
         Send(Response);
+        if(Result&&!ViewHint.AssetPath.IsEmpty())Presentation.Queue(ViewHint);
         const FString Path=Field(Params,TEXT("assetPath"));
         if(!Path.IsEmpty())
         {
@@ -243,6 +262,7 @@ private:
             if(Type==TEXT("hello_ack")){bAuthenticated=true;SendSelection();continue;}
             if(bAuthenticated&&Type==TEXT("request"))Request(O);
         }
+        Presentation.Tick();
         const double Now=FPlatformTime::Seconds();
         if((!Socket||!Socket->IsConnected())&&Now-LastConnect>2.0&&(!bConnecting||Now-LastConnect>10.0)){LastConnect=Now;Connect();}
         for(auto Weak:Dirty)

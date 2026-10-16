@@ -1,10 +1,24 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "DSHBlueprintOps.h"
+#include "DSHAssetPresentation.h"
+#include "DSHMcpEditAdapter.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "BlueprintEditor.h"
+#include "Editor.h"
+#include "Framework/Application/SlateApplication.h"
+#include "Framework/Docking/TabManager.h"
 #include "Misc/AutomationTest.h"
+#include "Misc/PackageName.h"
+#include "MaterialEditingLibrary.h"
+#include "Materials/Material.h"
+#include "Materials/MaterialExpressionConstant.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "UObject/UObjectGlobals.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "Widgets/SWindow.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHBlueprintRoundTrip,"DSH.Bridge.BlueprintRoundTrip",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
 bool FDSHBlueprintRoundTrip::RunTest(const FString&)
@@ -33,8 +47,12 @@ bool FDSHBlueprintRoundTrip::RunTest(const FString&)
     auto Preview=Ops.Execute(TEXT("preview_patch"),Patch,Code,Error);
     if(!TestTrue(TEXT("Preview and compile transient copy: ")+Error,Preview.IsValid()))return false;
     TestEqual(TEXT("Preview leaves original unchanged"),Ops.Execute(TEXT("read_blueprint"),ReadParams,Code,Error)->GetStringField(TEXT("revision")),Revision);
-    auto Applied=Ops.Execute(TEXT("apply_patch"),Patch,Code,Error);
+    FDSHAssetViewHint ViewHint;
+    auto Applied=Ops.Execute(TEXT("apply_patch"),Patch,Code,Error,&ViewHint);
     if(!TestTrue(TEXT("Apply and compile blueprint: ")+Error,Applied.IsValid()))return false;
+    TestEqual(TEXT("Committed edit identifies the actual asset"),ViewHint.AssetPath,Created->GetStringField(TEXT("assetPath")));
+    TestFalse(TEXT("Committed edit identifies a graph"),ViewHint.Graph.IsEmpty());
+    TestTrue(TEXT("Committed edit identifies generated nodes"),ViewHint.NodeIds.Num()>0);
     TestNotEqual(TEXT("Edit changes revision"),Applied->GetStringField(TEXT("revision")),Revision);
     TestFalse(TEXT("Edit does not save automatically"),Applied->GetBoolField(TEXT("saved")));
     UBlueprint* Actual=LoadObject<UBlueprint>(nullptr,*Created->GetStringField(TEXT("assetPath")));
@@ -56,6 +74,99 @@ bool FDSHBlueprintReject::RunTest(const FString&)
     P->SetStringField(TEXT("assetPath"),TEXT("/Game/../Engine/Forbidden"));TestFalse(TEXT("Reject traversal"),Ops.Execute(TEXT("create_blueprint"),P,Code,Error).IsValid());
     const auto Catalog=Ops.Execute(TEXT("catalog"),MakeShared<FJsonObject>(),Code,Error);TestTrue(TEXT("Catalog available"),Catalog.IsValid());
     if(Catalog)TestTrue(TEXT("Catalog contains callable functions"),Catalog->GetArrayField(TEXT("functions")).Num()>0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHMcpPresentationHints,"DSH.Bridge.McpPresentationHints",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FDSHMcpPresentationHints::RunTest(const FString&)
+{
+    auto ToolArguments=MakeShared<FJsonObject>();
+    ToolArguments->SetStringField(TEXT("asset_path"),TEXT("/Game/Materials/M_Test"));
+    ToolArguments->SetStringField(TEXT("expression_guid"),TEXT("DEADBEEF"));
+    auto Call=MakeShared<FJsonObject>();
+    Call->SetStringField(TEXT("tool_name"),TEXT("set_expression_property"));
+    Call->SetObjectField(TEXT("arguments"),ToolArguments);
+    auto Result=MakeShared<FJsonObject>();
+    auto Hints=FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result);
+    if(!TestEqual(TEXT("One edited asset"),Hints.Num(),1))return false;
+    TestEqual(TEXT("Package path becomes an object path"),Hints[0].AssetPath,FString(TEXT("/Game/Materials/M_Test.M_Test")));
+    TestTrue(TEXT("Expression is available for material focus"),Hints[0].NodeIds.Contains(TEXT("DEADBEEF")));
+    Result->SetBoolField(TEXT("isError"),true);
+    TestTrue(TEXT("Failed MCP calls do not open assets"),FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result).IsEmpty());
+    Call->SetStringField(TEXT("tool_name"),TEXT("get_expression_property"));
+    Result->SetBoolField(TEXT("isError"),false);
+    TestTrue(TEXT("Read-only MCP calls do not open assets"),FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result).IsEmpty());
+    auto Graph=MakeShared<FJsonObject>();
+    Graph->SetStringField(TEXT("graph"),TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph"));
+    auto Position=MakeShared<FJsonObject>();Position->SetNumberField(TEXT("x"),420);Position->SetNumberField(TEXT("y"),120);
+    Graph->SetObjectField(TEXT("pos"),Position);
+    Call->SetStringField(TEXT("tool_name"),TEXT("create_node"));Call->SetObjectField(TEXT("arguments"),Graph);
+    Hints=FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result);
+    if(!TestEqual(TEXT("Graph reference identifies its Blueprint"),Hints.Num(),1))return false;
+    TestEqual(TEXT("Graph reference resolves to Blueprint asset"),Hints[0].AssetPath,FString(TEXT("/Game/Blueprints/BP_Test.BP_Test")));
+    TestEqual(TEXT("Graph reference is preserved for navigation"),Hints[0].Graph,FString(TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph")));
+    TestTrue(TEXT("Node position is available for centering"),Hints[0].Center.IsSet());
+    auto Material=MakeShared<FJsonObject>();
+    Material->SetStringField(TEXT("material_or_function"),TEXT("/Game/Materials/M_Test.M_Test"));
+    Material->SetNumberField(TEXT("x"),350);Material->SetNumberField(TEXT("y"),200);
+    Call->SetStringField(TEXT("tool_name"),TEXT("add_expression"));Call->SetObjectField(TEXT("arguments"),Material);
+    Hints=FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result);
+    if(!TestEqual(TEXT("Material tool identifies edited material"),Hints.Num(),1))return false;
+    TestTrue(TEXT("Material coordinates are available for centering"),Hints[0].Center.IsSet());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHAssetPresentationWindow,"DSH.Bridge.PresentationWindow",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FDSHAssetPresentationWindow::RunTest(const FString&)
+{
+    if(IsRunningCommandlet()||!FSlateApplication::IsInitialized())return true;
+    FDSHBlueprintOps Ops;FString Code,Error;
+    const FString Path=TEXT("/Game/DSHBridgeTests/BP_View_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    auto Params=MakeShared<FJsonObject>();Params->SetStringField(TEXT("assetPath"),Path);Params->SetStringField(TEXT("parent"),TEXT("Actor"));
+    auto Created=Ops.Execute(TEXT("create_blueprint"),Params,Code,Error);
+    if(!TestTrue(TEXT("Create presentation fixture: ")+Error,Created.IsValid()))return false;
+    UBlueprint* Blueprint=LoadObject<UBlueprint>(nullptr,*Created->GetStringField(TEXT("assetPath")));
+    if(!TestNotNull(TEXT("Created Blueprint is loaded"),Blueprint))return false;
+    TArray<UEdGraph*> Graphs;Blueprint->GetAllGraphs(Graphs);
+    if(!TestTrue(TEXT("Blueprint has a graph"),Graphs.Num()>0))return false;
+    FDSHAssetViewHint Hint;Hint.AssetPath=Blueprint->GetPathName();Hint.Graph=Graphs[0]->GraphGuid.ToString();
+    if(Graphs[0]->Nodes.Num()>0)Hint.NodeIds.Add(Graphs[0]->Nodes[0]->NodeGuid.ToString());
+    FDSHAssetPresentation Presentation;Presentation.Queue(Hint);Presentation.Tick();Presentation.Tick();
+    UAssetEditorSubsystem* Editors=GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+    IAssetEditorInstance* Instance=Editors?Editors->FindEditorForAsset(Blueprint,false):nullptr;
+    if(!TestNotNull(TEXT("Asset editor opened"),Instance))return false;
+    TSharedPtr<FTabManager> Tabs=Instance->GetAssociatedTabManager();
+    TSharedPtr<SDockTab> Tab=Tabs.IsValid()?Tabs->GetOwnerTab():nullptr;
+    TSharedPtr<SWindow> Window=Tab.IsValid()?Tab->GetParentWindow():FSlateApplication::Get().GetActiveTopLevelWindow();
+    if(!TestTrue(TEXT("Asset editor has a window"),Window.IsValid()))return false;
+    TestTrue(TEXT("Asset editor window is maximized"),Window->IsWindowMaximized());
+    if(Instance->GetEditorName()==TEXT("BlueprintEditor"))
+        TestEqual(TEXT("Blueprint canvas shows the modified graph"),static_cast<FBlueprintEditor*>(Instance)->GetFocusedGraph(),Graphs[0]);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHMaterialPresentationWindow,"DSH.Bridge.MaterialPresentationWindow",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FDSHMaterialPresentationWindow::RunTest(const FString&)
+{
+    if(IsRunningCommandlet()||!FSlateApplication::IsInitialized())return true;
+    const FString PackageName=TEXT("/Game/DSHBridgeTests/M_View_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    UPackage* Package=CreatePackage(*PackageName);
+    UMaterial* Material=NewObject<UMaterial>(Package,FName(*FPackageName::GetShortName(PackageName)),RF_Public|RF_Standalone);
+    if(!TestNotNull(TEXT("Create material fixture"),Material))return false;
+    FAssetRegistryModule::AssetCreated(Material);
+    UMaterialExpression* Expression=UMaterialEditingLibrary::CreateMaterialExpression(Material,UMaterialExpressionConstant::StaticClass(),350,200);
+    if(!TestNotNull(TEXT("Material expression created"),Expression))return false;
+    FDSHAssetViewHint Hint;Hint.AssetPath=Material->GetPathName();Hint.NodeIds.Add(Expression->MaterialExpressionGuid.ToString());Hint.Center=FVector2D(350,200);
+    FDSHAssetPresentation Presentation;Presentation.Queue(Hint);Presentation.Tick();Presentation.Tick();
+    UAssetEditorSubsystem* Editors=GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+    IAssetEditorInstance* Instance=Editors?Editors->FindEditorForAsset(Material,false):nullptr;
+    if(!TestNotNull(TEXT("Material editor opened"),Instance))return false;
+    TestEqual(TEXT("Material editor handles expression focus"),Instance->GetEditorName(),FName(TEXT("MaterialEditor")));
+    TSharedPtr<FTabManager> Tabs=Instance->GetAssociatedTabManager();
+    TSharedPtr<SDockTab> Tab=Tabs.IsValid()?Tabs->GetOwnerTab():nullptr;
+    TSharedPtr<SWindow> Window=Tab.IsValid()?Tab->GetParentWindow():FSlateApplication::Get().GetActiveTopLevelWindow();
+    if(!TestTrue(TEXT("Material editor has a window"),Window.IsValid()))return false;
+    TestTrue(TEXT("Material editor window is maximized"),Window->IsWindowMaximized());
     return true;
 }
 #endif

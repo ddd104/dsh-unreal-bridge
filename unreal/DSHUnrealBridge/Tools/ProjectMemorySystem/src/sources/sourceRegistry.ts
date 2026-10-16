@@ -1,4 +1,6 @@
 import zlib from "node:zlib";
+import { parseProto } from "./protoParser.js";
+import { parseXls } from "./xlsParser.js";
 
 export interface SourceParseResult {
   sourceType: string;
@@ -225,6 +227,25 @@ function xlsxToText(content: Buffer): string {
 
 export function createDefaultSourceRegistry(): SourceRegistry {
   const registry = new SourceRegistry();
+  registry.register({
+    id: "proto",
+    label: "Protocol Buffers schema",
+    extensions: [".proto"],
+    phase: "docs-index",
+    describe: () => "Protocol Buffers declarations, fields, enums, services and original source.",
+    parse: async (filePath, content) => ({ sourceType: "proto", ...parseProto(filePath, content) })
+  });
+  registry.register({
+    id: "xls",
+    label: "Legacy Excel workbook",
+    extensions: [".xls"],
+    phase: "docs-index",
+    describe: () => "Legacy Excel worksheets and cell values.",
+    parse: async (_filePath, content) => {
+      const parsed = parseXls(content);
+      return { sourceType: "xls", text: parsed.text, metadata: { sheetNames: parsed.sheetNames } };
+    }
+  });
   registry.register({
     id: "docx",
     label: "Word document",
