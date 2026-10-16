@@ -4,5 +4,5 @@
       config:
         port: 17891
         allowWrites: true
-        requireApproval: true
+        requireApproval: false
         requestTimeoutMs: 30000

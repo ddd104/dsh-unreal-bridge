@@ -27,7 +27,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 1. 打开 DSH 与 EHV。聊天输入框上方会出现 **Unreal Editor** 区域，选择 EHV 实例；每个对话分别选择。
 2. 在 UE 的 Content Browser 选中普通蓝图，返回 DSH 提问。选区变化只更新显示和本地缓存，不主动调用模型。
 3. 例如：“读取当前选中的蓝图，在 BeginPlay 后增加 PrintString，打印 Hello。先预览，确认后应用，不要保存。”
-4. 在 DSH 的批准提示中允许后，修改才会执行。模型应先读当前版本，再查询函数/引脚、生成补丁、预览并应用。
+4. 模型先读当前版本，再查询函数/引脚、生成补丁、预览并应用。安装配置中 `requireApproval: false` 时，应用不再弹出 DSH 批准提示。
 5. 检查编辑器后明确要求保存；也可要求撤销最近一次插件图修改。
 
 对其他资产提出查询、创建、修改或删除要求时，DSH 先列出 UE 5.8 MCP 工具集、读取目标工具的参数说明，再直接调用已绑定编辑器里的工具。无需生成 Python、Shell 或 Editor Utility 脚本。实际可用操作取决于工程启用的 UE 工具集；本机 EHV 已启用 `ModelContextProtocol` 与 `AllToolsets`。脚本执行型 MCP 工具在桥接层被拒绝。
@@ -40,7 +40,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 
 安装脚本发现旧 `AgentProjectGraph/Cache` 时，会复制其 UE 快照及证据到新插件缓存，再把旧插件移入工程的 `Saved/DSHUnrealBridgeBackups/`，避免旧菜单与 HTTP 服务继续加载。旧图谱和记忆不会直接复用；在编辑器中更新一次即可按新路径重建。
 
-**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 仍会禁用 MCP 调用和其他写入。插件自己的蓝图应用、撤销和保存仍调用 DSH 批准服务；`approval: never` 会拒绝这些操作。`requireApproval: false` 只控制插件自己的蓝图写入批准，不影响 MCP 的默认执行方式。
+**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 仍会禁用 MCP 调用和其他写入。安装配置将 `requireApproval` 设为 `false`，使蓝图应用、撤销、保存和项目知识记录不再调用 DSH 批准服务，适配 `approval: never` 的会话。预览、版本校验、请求去重及显式保存要求仍然生效。若希望这些写入逐次请求批准，可将 `requireApproval` 改为 `true`，并使用 `approval: ask` 的 DSH preset。
 
 ## 已实现
 
@@ -58,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 | 预览与编译 | 临时副本验证补丁并编译，原资产不变；实际执行再次检查版本 |
 | 冲突、撤销与保存 | 版本变化拒绝提交；仅撤销仍位于撤销栈顶部的插件图修改；显式编译并保存 |
 | 连接可靠性 | 自动重连、心跳、请求超时、请求编号去重、未知结果查询 |
-| 本机访问控制 | 仅监听 127.0.0.1、随机令牌、写操作批准、审计日志；没有远程执行脚本接口 |
+| 本机访问控制 | 仅监听 127.0.0.1、随机令牌、可选写操作批准、审计日志；没有远程执行脚本接口 |
 
 ## 支持范围
 
@@ -80,7 +80,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
   config:
     port: 17891
     allowWrites: true
-    requireApproval: true
+    requireApproval: false
     requestTimeoutMs: 30000
 ```
 

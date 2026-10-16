@@ -10,7 +10,7 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_bind` | `editorId` 字符串或 null，仅改变当前对话绑定 |
 | `unreal_catalog` | 可选 `query`、`limit`，查询函数路径和精确引脚名 |
 | `unreal_knowledge` | `tool`、`arguments`，通过当前对话绑定的 UE 编辑器查询项目状态、资料、图谱候选、源码及分页资产快照 |
-| `unreal_knowledge_record` | `tool`、`arguments`、UUID `requestId`，批准后保存带来源的推断或经验；写入项目缓存并支持请求状态查询 |
+| `unreal_knowledge_record` | `tool`、`arguments`、UUID `requestId`，按配置保存带来源的推断或经验；写入项目缓存并支持请求状态查询 |
 | `unreal_mcp_tools` | `{}`，列出当前 UE 实例注册的顶层 MCP 工具与参数 schema |
 | `unreal_mcp_toolsets` | `{}`，列出当前 UE 实例中的工具集 |
 | `unreal_mcp_describe` | `toolsetName`，查询工具集内函数、用途与精确参数 schema |
@@ -20,7 +20,7 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_focus_asset` | `assetPath`，可选 `graph`、`nodeIds`；手动打开并最大化资产编辑器，节点可识别时聚焦；返回 `queued` 表示展示任务已排队 |
 | `unreal_preview_create` | `assetPath`、`parent: Actor/ActorComponent/Object` |
 | `unreal_preview_patch` | `assetPath`、`graph`、`baseRevision`、`operations` |
-| `unreal_apply` | `previewId`、UUID `requestId`，批准后应用，默认不保存 |
+| `unreal_apply` | `previewId`、UUID `requestId`，按配置应用，默认不保存 |
 | `unreal_request_status` | UUID `requestId`，查询原请求结果，不重做写入 |
 | `unreal_undo` | `assetPath`、`baseRevision`、UUID `requestId` |
 | `unreal_save` | `assetPath`、`baseRevision`、UUID `requestId` |

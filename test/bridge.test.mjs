@@ -39,6 +39,16 @@ test('DSH tools require a session and actual approval before writing',async t=>{
   assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,18);
 });
 
+test('bridge writes use the configured approval policy',async t=>{
+  const stateDir=await mkdtemp(join(tmpdir(),'dsh-no-approval-'));const tools=new Map();const services=new Map();let approvalRequests=0;let writes=0;
+  const ctx={tools:{register:d=>tools.set(d.name,d)},systemPrompt:{section(){}},typert:{register(){}},provide:(k,v)=>services.set(k,v),effect:f=>f(),get:k=>k==='approval'?{request:async()=>{approvalRequests++;return 'rejected';}}:undefined};
+  await apply(ctx,{stateDir,port:0,requireApproval:false});const b=services.get('unrealBridge').bridge;t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});
+  await editor(b,'UE1',m=>{if(m.method==='apply_patch')writes++;return{valid:true,revision:'v2'};});b.bind('s','UE1');
+  const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());
+  assert.equal((await tools.get('unreal_apply').execute({previewId:p.previewId,requestId:randomUUID()},exec)).ok,true);
+  assert.equal(writes,1);assert.equal(approvalRequests,0);
+});
+
 test('asset focus stays in the bound editor and rejects older plugins',async t=>{
   const b=await fixture(t);const calls=[];
   await editor(b,'A',m=>{calls.push({editor:'A',method:m.method,params:m.params});return{queued:true};},['focus_asset']);
