@@ -12,6 +12,7 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/Actor.h"
 #include "K2Node_CallFunction.h"
+#include "K2Node_CustomEvent.h"
 #include "K2Node_Event.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
@@ -116,6 +117,7 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Read(UBlueprint* BP,const TSharedPtr<F
                 auto NO=Obj(); NO->SetStringField(TEXT("id"),N->NodeGuid.ToString()); NO->SetStringField(TEXT("class"),N->GetClass()->GetPathName()); NO->SetStringField(TEXT("title"),N->GetNodeTitle(ENodeTitleType::ListView).ToString());
                 if(const auto Call=Cast<UK2Node_CallFunction>(N))NO->SetStringField(TEXT("functionPath"),GetPathNameSafe(Call->FunctionReference.ResolveMember<UFunction>()));
                 if(const auto Event=Cast<UK2Node_Event>(N))NO->SetStringField(TEXT("functionPath"),GetPathNameSafe(Event->EventReference.ResolveMember<UFunction>()));
+                if(const auto CustomEvent=Cast<UK2Node_CustomEvent>(N))NO->SetStringField(TEXT("customEventName"),CustomEvent->CustomFunctionName.ToString());
                 NO->SetStringField(TEXT("comment"),N->NodeComment); NO->SetNumberField(TEXT("x"),N->NodePosX); NO->SetNumberField(TEXT("y"),N->NodePosY);
                 NO->SetStringField(TEXT("enabledState"),LexToString(N->GetDesiredEnabledState()));
                 NO->SetBoolField(TEXT("isAutomaticallyPlacedGhostNode"),N->IsAutomaticallyPlacedGhostNode());
@@ -158,24 +160,45 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
     {
         const TSharedPtr<FJsonObject>* OpPtr=nullptr;if(!Entry->TryGetObject(OpPtr)){Error=TEXT("Operation must be an object");return false;} const auto Op=*OpPtr;
         const FString Kind=Str(Op,TEXT("op")); const FString NodeId=Str(Op,TEXT("nodeId")); UEdGraphNode* N=Nodes.FindRef(NodeId);
-        if(Kind==TEXT("add_node"))
+        if(Kind==TEXT("add_node")||Kind==TEXT("add_custom_event"))
         {
             if(NodeId.IsEmpty()||NodeId.Len()>160||Nodes.Contains(NodeId)){Error=TEXT("New nodeId must be unique and nonempty");return false;}
-            const FString FunctionPath=Str(Op,TEXT("functionPath"));
-            UFunction* Function=FindObject<UFunction>(nullptr,*FunctionPath);
-            if(!SupportedFunction(Function)) {Error=TEXT("Function must be a loaded native BlueprintCallable function or Blueprint event; search the catalog first");return false;}
-            const FString NodeKind=Str(Op,TEXT("kind"));
-            if(NodeKind==TEXT("call_function")&&Function->HasAnyFunctionFlags(FUNC_BlueprintCallable)&&!Function->HasAnyFunctionFlags(FUNC_BlueprintEvent))
+            if(Kind==TEXT("add_custom_event"))
             {
-                UK2Node_CallFunction* Call=NewObject<UK2Node_CallFunction>(Graph,NAME_None,RF_Transactional);Call->SetFromFunction(Function);N=Call;
+                if(!BP->UbergraphPages.Contains(Graph)){Error=TEXT("Custom events may only be added to an event graph");return false;}
+                const FString EventName=Str(Op,TEXT("eventName"));
+                auto ValidChar=[](TCHAR C,bool First){return (C>='A'&&C<='Z')||(C>='a'&&C<='z')||C=='_'||(!First&&C>='0'&&C<='9');};
+                if(EventName.IsEmpty()||EventName.Len()>100){Error=TEXT("Custom event name must contain 1..100 ASCII identifier characters");return false;}
+                for(int32 I=0;I<EventName.Len();++I)if(!ValidChar(EventName[I],I==0)){Error=TEXT("Custom event name must be an ASCII identifier");return false;}
+                const FName Name(*EventName);
+                if(BP->ParentClass->FindFunctionByName(Name)){Error=TEXT("Custom event name conflicts with a parent function");return false;}
+                for(const FBPVariableDescription& Variable:BP->NewVariables)if(Variable.VarName==Name){Error=TEXT("Custom event name conflicts with a variable");return false;}
+                TArray<UEdGraph*> All;BP->GetAllGraphs(All);
+                for(UEdGraph* G:All)
+                {
+                    if(G->GetFName()==Name){Error=TEXT("Custom event name conflicts with a graph");return false;}
+                    for(UEdGraphNode* Existing:G->Nodes)if(const auto* ExistingEvent=Cast<UK2Node_CustomEvent>(Existing))if(ExistingEvent->CustomFunctionName==Name){Error=TEXT("Custom event already exists");return false;}
+                }
+                auto* Event=NewObject<UK2Node_CustomEvent>(Graph,NAME_None,RF_Transactional);Event->CustomFunctionName=Name;N=Event;
             }
-            else if(NodeKind==TEXT("event")&&Function->HasAnyFunctionFlags(FUNC_BlueprintEvent)&&BP->ParentClass->IsChildOf(Function->GetOuterUClass()))
+            else
             {
-                if(!BP->UbergraphPages.Contains(Graph)){Error=TEXT("Events may only be added to an event graph");return false;}
-                TArray<UEdGraph*> All;BP->GetAllGraphs(All);for(UEdGraph* G:All)for(UEdGraphNode* Existing:G->Nodes)if(auto* E=Cast<UK2Node_Event>(Existing))if(E->EventReference.GetMemberName()==Function->GetFName()){Error=TEXT("Event already exists; connect to the existing event node");return false;}
-                UK2Node_Event* Event=NewObject<UK2Node_Event>(Graph,NAME_None,RF_Transactional);Event->EventReference.SetExternalMember(Function->GetFName(),Function->GetOuterUClass());Event->bOverrideFunction=true;N=Event;
+                const FString FunctionPath=Str(Op,TEXT("functionPath"));
+                UFunction* Function=FindObject<UFunction>(nullptr,*FunctionPath);
+                if(!SupportedFunction(Function)) {Error=TEXT("Function must be a loaded native BlueprintCallable function or Blueprint event; search the catalog first");return false;}
+                const FString NodeKind=Str(Op,TEXT("kind"));
+                if(NodeKind==TEXT("call_function")&&Function->HasAnyFunctionFlags(FUNC_BlueprintCallable)&&!Function->HasAnyFunctionFlags(FUNC_BlueprintEvent))
+                {
+                    UK2Node_CallFunction* Call=NewObject<UK2Node_CallFunction>(Graph,NAME_None,RF_Transactional);Call->SetFromFunction(Function);N=Call;
+                }
+                else if(NodeKind==TEXT("event")&&Function->HasAnyFunctionFlags(FUNC_BlueprintEvent)&&BP->ParentClass->IsChildOf(Function->GetOuterUClass()))
+                {
+                    if(!BP->UbergraphPages.Contains(Graph)){Error=TEXT("Events may only be added to an event graph");return false;}
+                    TArray<UEdGraph*> All;BP->GetAllGraphs(All);for(UEdGraph* G:All)for(UEdGraphNode* Existing:G->Nodes)if(auto* E=Cast<UK2Node_Event>(Existing))if(E->EventReference.GetMemberName()==Function->GetFName()){Error=TEXT("Event already exists; connect to the existing event node");return false;}
+                    UK2Node_Event* Event=NewObject<UK2Node_Event>(Graph,NAME_None,RF_Transactional);Event->EventReference.SetExternalMember(Function->GetFName(),Function->GetOuterUClass());Event->bOverrideFunction=true;N=Event;
+                }
+                else{Error=TEXT("Node kind and function are incompatible");return false;}
             }
-            else{Error=TEXT("Node kind and function are incompatible");return false;}
             Graph->AddNode(N,false,false);N->CreateNewGuid();N->PostPlacedNewNode();N->AllocateDefaultPins();Nodes.Add(NodeId,N);
             // Position is applied by the common position block below.
         }

@@ -23,6 +23,11 @@ test('authenticated native UE loopback origin is accepted',async t=>{const b=awa
 test('two conversations keep independent instance and selection state',async t=>{const b=await fixture(t);const a=await editor(b,'A'),c=await editor(b,'B');b.bind('one','A');b.bind('two','B');a.send(JSON.stringify({type:'event',sequence:1,event:'selection_changed',data:{assets:[{path:'/Game/A.A',class:'Blueprint'}]}}));await pause(20);assert.equal(b.state('one').selection[0].path,'/Game/A.A');assert.deepEqual(b.state('two').selection,[]);assert.equal((await b.read('two',{assetPath:'/Game/B'})).echo,'read_blueprint');const closed=once(b.editors.get('B').ws,'close');c.close();await closed;assert.equal(b.state('two').editorId,'B');assert.equal(b.state('two').connected,false);});
 test('out-of-order events cannot restore stale selections',async t=>{const b=await fixture(t);const ws=await editor(b);b.bind('s','UE1');for(const sequence of [2,1])ws.send(JSON.stringify({type:'event',sequence,event:'selection_changed',data:{assets:[{path:`/Game/N${sequence}`,class:'Blueprint'}]}}));await pause(20);assert.equal(b.state('s').selection[0].path,'/Game/N2');});
 test('patch schema rejects unknown ops, path escape and unknown fields',()=>{for(const p of [{...patch(),assetPath:'/Game/../Engine/X'},{...patch(),operations:[{op:'execute_shell',command:'x'}]},{...patch(),save:true}])assert.equal(patchSchema.safeParse(p).success,false);});
+test('patch schema accepts a named custom event and rejects invalid names',()=>{
+  const add={op:'add_custom_event',nodeId:'timerEvent',eventName:'PrintTime'};
+  assert.equal(patchSchema.safeParse({...patch(),operations:[add]}).success,true);
+  for(const eventName of ['2PrintTime','Print Time','Print-Time'])assert.equal(patchSchema.safeParse({...patch(),operations:[{...add,eventName}]}).success,false);
+});
 test('preview ownership prevents cross-session and cross-editor execution',async t=>{const b=await fixture(t);await editor(b,'A',()=>({valid:true}));await editor(b,'B');b.bind('one','A');b.bind('two','A');const p=await b.preview('one','patch',patch());assert.throws(()=>b.previewRecord('two',p.previewId),{code:'PREVIEW_EXPIRED'});b.bind('one','B');assert.throws(()=>b.previewRecord('one',p.previewId),{code:'INSTANCE_CHANGED'});});
 test('manual changes invalidate previews without triggering model calls',async t=>{const b=await fixture(t);const ws=await editor(b,'UE1',()=>({valid:true}));b.bind('s','UE1');const p=await b.preview('s','patch',patch());ws.send(JSON.stringify({type:'event',sequence:1,event:'blueprint_changed',data:{assetPath:'/Game/Test/BP_Test',revision:'v2'}}));await pause(20);assert.throws(()=>b.previewRecord('s',p.previewId),{code:'PREVIEW_EXPIRED'});});
 test('duplicate writes reuse result; changed parameters cannot reuse request ID',async t=>{const b=await fixture(t);let writes=0;await editor(b,'UE1',m=>m.method==='apply_patch'?{revision:`v${++writes+1}`}:{valid:true});b.bind('s','UE1');const p=await b.preview('s','patch',patch()),requestId=randomUUID();const first=await b.apply('s',p.previewId,requestId);assert.deepEqual(await b.apply('s',p.previewId,requestId),first);assert.equal(writes,1);await assert.rejects(b.mutate('s','save',{assetPath:'/Game/Other'},requestId),{code:'IDEMPOTENCY_MISMATCH'});const log=await readFile(join(b.config.stateDir,'audit.jsonl'),'utf8');assert.equal(log.includes(b.token),false);assert.match(log,/completed/);});
@@ -97,6 +102,19 @@ test('UE MCP calls run without approval and stay in the bound editor with reques
 test('UE MCP calls reject editors without the capability',async t=>{
   const bridge=await fixture(t);await editor(bridge);bridge.bind('chat','UE1');
   await assert.rejects(bridge.mcpTools('chat'),{code:'MCP_UNAVAILABLE'});
+});
+test('UE MCP toolset descriptions can be filtered before reaching the model',async t=>{
+  const bridge=await fixture(t);
+  const description={name:'BlueprintTools',tools:[
+    {name:'BlueprintTools.add_event',description:'Add an event.\nLong explanation.',inputSchema:{properties:{event_name:{type:'string'}}}},
+    {name:'BlueprintTools.find_nodes',description:'Find nodes.\nLong explanation.',inputSchema:{properties:{graph:{type:'object'}}}}
+  ]};
+  await editor(bridge,'UE1',message=>({content:[{type:'text',text:JSON.stringify(description)}]}),['mcp_tools']);
+  bridge.bind('chat','UE1');
+  const compact=await bridge.mcpDescribe('chat',{toolsetName:'BlueprintTools',query:'add_event',includeSchema:false});
+  assert.deepEqual(JSON.parse(compact.content[0].text).tools,[{name:'BlueprintTools.add_event',description:'Add an event.'}]);
+  const exact=await bridge.mcpDescribe('chat',{toolsetName:'BlueprintTools',query:'add_event'});
+  assert.deepEqual(JSON.parse(exact.content[0].text).tools,[description.tools[0]]);
 });
 
 test('project knowledge queries stay on the bound editor and require its capability',async t=>{

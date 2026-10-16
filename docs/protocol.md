@@ -13,7 +13,7 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_knowledge_record` | `tool`、`arguments`、UUID `requestId`，按配置保存带来源的推断或经验；写入项目缓存并支持请求状态查询 |
 | `unreal_mcp_tools` | `{}`，列出当前 UE 实例注册的顶层 MCP 工具与参数 schema |
 | `unreal_mcp_toolsets` | `{}`，列出当前 UE 实例中的工具集 |
-| `unreal_mcp_describe` | `toolsetName`，查询工具集内函数、用途与精确参数 schema |
+| `unreal_mcp_describe` | `toolsetName`，可选 `query` 按工具名过滤、`includeSchema: false` 返回简短列表；需要调用的工具再取得精确参数 schema |
 | `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`，默认直接调用工具集函数 |
 | `unreal_mcp_call` | `name`、`arguments`、UUID `requestId`，默认直接调用顶层 MCP 工具 |
 | `unreal_read_blueprint` | `assetPath`，可选 `graph`、`nodeIds`、`detail: summary/full` |
@@ -48,7 +48,7 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 }
 ```
 
-其他操作为 `remove_node`、`move_node` 和 `disconnect`。新节点临时编号仅在当前补丁中有效，应用后重新读取持久节点 GUID。
+其他操作为 `add_custom_event`（需要 UE 编辑器声明 `custom_event_patch` 能力，提供 `nodeId`、ASCII 标识符 `eventName` 和可选 `position`）、`remove_node`、`move_node` 和 `disconnect`。在同一补丁中，自定义事件的 `OutputDelegate` 引脚可连接 `/Script/Engine.KismetSystemLibrary:K2_SetTimerDelegate` 函数节点的 `Delegate` 输入，引脚 `Time` 和 `bLooping` 可用 `set_pin_default` 设置。新节点临时编号仅在当前补丁中有效，应用后重新读取持久节点 GUID 和 `customEventName`。
 
 ## WebSocket v1
 

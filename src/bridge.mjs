@@ -104,7 +104,18 @@ export class UnrealBridge extends EventEmitter {
   async knowledgeRecord(sessionId,args,signal){const {tool,arguments:toolArgs,requestId}=knowledgeRecordSchema.parse(args);const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.mutate(sessionId,'knowledge_call',{tool,arguments:toolArgs},requestId,signal);}
   async mcpTools(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_list_tools',{}, {signal});}
   async mcpToolsets(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'list_toolsets',arguments:{}},{signal});}
-  async mcpDescribe(sessionId,args,signal){const {toolsetName}=mcpDescribeSchema.parse(args);return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'describe_toolset',arguments:{toolset_name:toolsetName}},{signal});}
+  async mcpDescribe(sessionId,args,signal){
+    const {toolsetName,query,includeSchema}=mcpDescribeSchema.parse(args);
+    const result=await this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'describe_toolset',arguments:{toolset_name:toolsetName}},{signal});
+    if(!query&&includeSchema)return result;
+    const block=result?.content?.find(item=>item.type==='text');
+    let description;
+    try{description=JSON.parse(block?.text);}catch{fail('MCP_DESCRIPTION_UNPARSEABLE','Editor returned a toolset description that cannot be filtered');}
+    if(!Array.isArray(description?.tools))fail('MCP_DESCRIPTION_UNPARSEABLE','Editor returned a toolset description without tools');
+    const found=description.tools.filter(tool=>!query||tool.name?.toLowerCase().includes(query.toLowerCase()));
+    const tools=includeSchema?found:found.map(tool=>({name:tool.name,description:tool.description?.split('\n')[0]?.slice(0,180)??''}));
+    return {...result,content:result.content.map(item=>item===block?{...item,text:JSON.stringify({...description,tools})}:item)};
+  }
   async mcpCall(sessionId,args,signal){const {name,arguments:toolArgs,requestId}=mcpCallSchema.parse(args);this.mcpTarget(sessionId);return this.mutate(sessionId,'mcp_call_tool',{name,arguments:toolArgs},requestId,signal);}
   async mcpCallToolset(sessionId,args,signal){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal);}
   invalidate(editorId,asset){for(const [key,p] of this.previews) if(p.editorId===editorId&&(!asset||p.params.assetPath.split('.')[0]===asset.split('.')[0]))this.previews.delete(key);}

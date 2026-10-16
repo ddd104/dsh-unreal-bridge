@@ -9,6 +9,7 @@ const point = z.object({x:z.number().int().min(-100000).max(100000), y:z.number(
 const endpoint = z.object({node, pin:id}).strict();
 export const operation = z.discriminatedUnion('op', [
   z.object({op:z.literal('add_node'), nodeId:node, kind:z.enum(['call_function','event']), functionPath:z.string().max(512).regex(/^\/Script\/[A-Za-z0-9_]+\.[A-Za-z0-9_]+:[A-Za-z0-9_]+$/), position:point.optional()}).strict(),
+  z.object({op:z.literal('add_custom_event'), nodeId:node, eventName:z.string().min(1).max(100).regex(/^[A-Za-z_][A-Za-z0-9_]*$/), position:point.optional()}).strict(),
   z.object({op:z.literal('remove_node'), nodeId:node}).strict(),
   z.object({op:z.literal('set_pin_default'), nodeId:node, pin:id, value:z.string().max(8192)}).strict(),
   z.object({op:z.literal('move_node'), nodeId:node, position:point}).strict(),
@@ -22,7 +23,7 @@ export const focusSchema = z.object({assetPath:z.string().max(512).regex(/^\/[A-
 export const catalogSchema = z.object({query:z.string().max(100).optional(),limit:z.number().int().min(1).max(50).default(20)}).strict();
 export const mcpToolName = z.string().min(1).max(160).regex(/^[A-Za-z0-9_.-]+$/);
 export const mcpArguments = z.record(z.string(),z.json());
-export const mcpDescribeSchema = z.object({toolsetName:mcpToolName}).strict();
+export const mcpDescribeSchema = z.object({toolsetName:mcpToolName,query:z.string().min(1).max(100).optional(),includeSchema:z.boolean().default(true)}).strict();
 export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();

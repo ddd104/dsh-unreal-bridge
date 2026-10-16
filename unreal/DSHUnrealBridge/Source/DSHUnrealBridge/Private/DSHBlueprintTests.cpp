@@ -9,7 +9,6 @@
 #include "Framework/Docking/TabManager.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/PackageName.h"
-#include "MaterialEditingLibrary.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionConstant.h"
 #include "Engine/Blueprint.h"
@@ -201,8 +200,13 @@ bool FDSHMaterialPresentationWindow::RunTest(const FString&)
     UMaterial* Material=NewObject<UMaterial>(Package,FName(*FPackageName::GetShortName(PackageName)),RF_Public|RF_Standalone);
     if(!TestNotNull(TEXT("Create material fixture"),Material))return false;
     FAssetRegistryModule::AssetCreated(Material);
-    UMaterialExpression* Expression=UMaterialEditingLibrary::CreateMaterialExpression(Material,UMaterialExpressionConstant::StaticClass(),350,200);
+    UMaterialExpressionConstant* Expression=NewObject<UMaterialExpressionConstant>(Material,NAME_None,RF_Transactional);
     if(!TestNotNull(TEXT("Material expression created"),Expression))return false;
+    Material->GetExpressionCollection().AddExpression(Expression);
+    Expression->Material=Material;
+    Expression->MaterialExpressionEditorX=350;
+    Expression->MaterialExpressionEditorY=200;
+    Expression->MaterialExpressionGuid=FGuid::NewGuid();
     FDSHAssetViewHint Hint;Hint.AssetPath=Material->GetPathName();Hint.NodeIds.Add(Expression->MaterialExpressionGuid.ToString());Hint.Center=FVector2D(350,200);
     FDSHAssetPresentation Presentation;Presentation.Queue(Hint);Presentation.Tick();Presentation.Tick();
     UAssetEditorSubsystem* Editors=GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();

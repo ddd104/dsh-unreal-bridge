@@ -62,7 +62,7 @@ bool IsMutation(const FString& Name)
     return false;
 }
 
-FString NormalizeAssetPath(const FString& Path)
+FString NormalizeMcpAssetPath(const FString& Path)
 {
     FString RootObject = Path;
     int32 SubobjectStart = INDEX_NONE;
@@ -110,13 +110,13 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
         const FString Text = Value->AsString();
         if (IsAssetKey(ParentKey))
         {
-            const FString Path = NormalizeAssetPath(Text);
+            const FString Path = NormalizeMcpAssetPath(Text);
             if (!Path.IsEmpty()) Out.Assets.AddUnique(Path);
         }
         else if (IsNodeKey(ParentKey) && !Text.IsEmpty() && Text.Len() <= 256)
         {
             Out.Nodes.AddUnique(Text);
-            const FString Path = NormalizeAssetPath(Text);
+            const FString Path = NormalizeMcpAssetPath(Text);
             if (!Path.IsEmpty())
             {
                 Out.Assets.AddUnique(Path);
@@ -133,7 +133,7 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
             if (Out.Graph.IsEmpty()) Out.Graph = Text;
             if (ParentKey == TEXT("graph"))
             {
-                const FString Path = NormalizeAssetPath(Text);
+                const FString Path = NormalizeMcpAssetPath(Text);
                 if (!Path.IsEmpty()) Out.Assets.AddUnique(Path);
             }
         }
@@ -145,7 +145,7 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
         }
         else if ((ParentKey == TEXT("text") || ParentKey == TEXT("result")) && Text.StartsWith(TEXT("/")))
         {
-            const FString Path = NormalizeAssetPath(Text);
+            const FString Path = NormalizeMcpAssetPath(Text);
             if (!Path.IsEmpty())
             {
                 Out.Assets.AddUnique(Path);
@@ -185,7 +185,7 @@ TArray<FDSHAssetViewHint> FDSHMcpEditAdapter::FromCall(const FString& ToolName,
         && ToolArguments->TryGetStringField(TEXT("asset_name"), AssetName)
         && !AssetName.IsEmpty())
     {
-        const FString CreatedPath = NormalizeAssetPath(FPaths::Combine(Folder, AssetName));
+        const FString CreatedPath = NormalizeMcpAssetPath(FPaths::Combine(Folder, AssetName));
         if (!CreatedPath.IsEmpty()) Input.Assets.AddUnique(CreatedPath);
     }
     const bool bPreferOutput = ActualName == TEXT("create") || ActualName.StartsWith(TEXT("create_"))
