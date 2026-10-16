@@ -220,14 +220,17 @@ private:
             const TWeakPtr<FDSHConnection> Weak=AsShared();
             FString MCPError;
             const TSharedPtr<FJsonObject> ToolArguments=*ArgumentsPtr;
+            const auto Before=FDSHMcpEditAdapter::CaptureGraphs(FDSHMcpEditAdapter::FromCall(Name,ToolArguments,MakeShared<FJsonObject>()));
             const bool bStarted=IDSHUnrealBridgeMCPModule::Get().CallTool(Name,ToolArguments,Id,
-                [Weak,Id,bWrite,Name,ToolArguments](TSharedPtr<FJsonObject> Result)
+                [Weak,Id,bWrite,Name,ToolArguments,Before](TSharedPtr<FJsonObject> Result)
                 {
-                    auto Finish=[Weak,Id,bWrite,Result,Name,ToolArguments]()
+                    auto Finish=[Weak,Id,bWrite,Result,Name,ToolArguments,Before]()
                     {
                         if(auto Self=Weak.Pin())
                         {
-                            for(const FDSHAssetViewHint& Hint:FDSHMcpEditAdapter::FromCall(Name,ToolArguments,Result))Self->Presentation.Queue(Hint);
+                            auto Hints=FDSHMcpEditAdapter::FromCall(Name,ToolArguments,Result);
+                            FDSHMcpEditAdapter::IncludeGraphChanges(Hints,Before);
+                            for(const FDSHAssetViewHint& Hint:Hints)Self->Presentation.Queue(Hint);
                             Self->CompleteMcp(Id,Result,TEXT("MCP_TOOL_ERROR"),TEXT("MCP tool returned no result"),bWrite);
                         }
                     };

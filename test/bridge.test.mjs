@@ -44,6 +44,7 @@ test('bridge writes use the configured approval policy',async t=>{
   const ctx={tools:{register:d=>tools.set(d.name,d)},systemPrompt:{section(){}},typert:{register(){}},provide:(k,v)=>services.set(k,v),effect:f=>f(),get:k=>k==='approval'?{request:async()=>{approvalRequests++;return 'rejected';}}:undefined};
   await apply(ctx,{stateDir,port:0,requireApproval:false});const b=services.get('unrealBridge').bridge;t.after(async()=>{await b.close();await rm(stateDir,{recursive:true,force:true});});
   await editor(b,'UE1',m=>{if(m.method==='apply_patch')writes++;return{valid:true,revision:'v2'};});b.bind('s','UE1');
+  assert.equal(b.state('s').requireApproval,false);
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());
   assert.equal((await tools.get('unreal_apply').execute({previewId:p.previewId,requestId:randomUUID()},exec)).ok,true);
   assert.equal(writes,1);assert.equal(approvalRequests,0);

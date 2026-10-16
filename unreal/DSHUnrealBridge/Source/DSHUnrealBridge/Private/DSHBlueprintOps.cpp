@@ -117,6 +117,8 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Read(UBlueprint* BP,const TSharedPtr<F
                 if(const auto Call=Cast<UK2Node_CallFunction>(N))NO->SetStringField(TEXT("functionPath"),GetPathNameSafe(Call->FunctionReference.ResolveMember<UFunction>()));
                 if(const auto Event=Cast<UK2Node_Event>(N))NO->SetStringField(TEXT("functionPath"),GetPathNameSafe(Event->EventReference.ResolveMember<UFunction>()));
                 NO->SetStringField(TEXT("comment"),N->NodeComment); NO->SetNumberField(TEXT("x"),N->NodePosX); NO->SetNumberField(TEXT("y"),N->NodePosY);
+                NO->SetStringField(TEXT("enabledState"),LexToString(N->GetDesiredEnabledState()));
+                NO->SetBoolField(TEXT("isAutomaticallyPlacedGhostNode"),N->IsAutomaticallyPlacedGhostNode());
                 TArray<TSharedPtr<FJsonValue>> Pins; for(UEdGraphPin* P:N->Pins)if(P)Pins.Add(JV(PinData(P))); NO->SetArrayField(TEXT("pins"),Pins); Nodes.Add(JV(NO));
             }
             GO->SetArrayField(TEXT("nodes"),Nodes);

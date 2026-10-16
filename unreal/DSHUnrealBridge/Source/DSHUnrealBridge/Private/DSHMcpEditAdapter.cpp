@@ -1,6 +1,10 @@
 #include "DSHMcpEditAdapter.h"
 
 #include "Dom/JsonValue.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraphUtilities.h"
+#include "Engine/Blueprint.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Serialization/JsonSerializer.h"
@@ -83,6 +87,11 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
     {
         const TSharedPtr<FJsonObject> Object = Value->AsObject();
         if (!Object.IsValid()) return;
+        // UE toolset UObject references wrap the path. Preserve its semantic
+        // parent (graph, node, material, ...) instead of treating refPath as a key.
+        FString RefPath;
+        if (Object->TryGetStringField(TEXT("refPath"), RefPath))
+            Extract(MakeShared<FJsonValueString>(RefPath), ParentKey, Out, Depth + 1);
         if (ParentKey == TEXT("pos") || ParentKey == TEXT("position"))
         {
             double X = 0, Y = 0;
@@ -193,4 +202,78 @@ TArray<FDSHAssetViewHint> FDSHMcpEditAdapter::FromCall(const FString& ToolName,
         Hint.Center = Input.Center.IsSet() ? Input.Center : Output.Center;
     }
     return Hints;
+}
+
+namespace
+{
+UEdGraph* ResolveGraph(const FDSHAssetViewHint& Hint)
+{
+    if (Hint.Graph.IsEmpty()) return nullptr;
+    UBlueprint* Blueprint = Cast<UBlueprint>(LoadObject<UObject>(nullptr, *Hint.AssetPath));
+    if (!Blueprint) return nullptr;
+    TArray<UEdGraph*> Graphs;
+    Blueprint->GetAllGraphs(Graphs);
+    for (UEdGraph* Graph : Graphs)
+        if (Graph && (Graph->GetPathName() == Hint.Graph || Graph->GetName() == Hint.Graph
+            || Graph->GraphGuid.ToString() == Hint.Graph)) return Graph;
+    return nullptr;
+}
+
+FString NodeText(UEdGraphNode* Node)
+{
+    TSet<UObject*> Nodes;
+    Nodes.Add(Node);
+    FString Text;
+    FEdGraphUtilities::ExportNodesToText(Nodes, Text);
+    return Text;
+}
+}
+
+TArray<FDSHMcpGraphSnapshot> FDSHMcpEditAdapter::CaptureGraphs(const TArray<FDSHAssetViewHint>& Hints)
+{
+    TArray<FDSHMcpGraphSnapshot> Snapshots;
+    for (const FDSHAssetViewHint& Hint : Hints)
+    {
+        UEdGraph* Graph = ResolveGraph(Hint);
+        if (!Graph) continue;
+        FDSHMcpGraphSnapshot& Snapshot = Snapshots.AddDefaulted_GetRef();
+        Snapshot.GraphPath = Graph->GetPathName();
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node) continue;
+            const FString Id = Node->NodeGuid.ToString();
+            Snapshot.Nodes.Add(Id, NodeText(Node));
+            Snapshot.Positions.Add(Id, FVector2D(Node->NodePosX, Node->NodePosY));
+        }
+    }
+    return Snapshots;
+}
+
+void FDSHMcpEditAdapter::IncludeGraphChanges(TArray<FDSHAssetViewHint>& Hints,
+    const TArray<FDSHMcpGraphSnapshot>& Before)
+{
+    // Tools such as write_graph_dsl return null rather than changed node IDs.
+    // Compare only the graph addressed by the call, without another model/tool round.
+    for (FDSHAssetViewHint& Hint : Hints)
+    {
+        UEdGraph* Graph = ResolveGraph(Hint);
+        if (!Graph) continue;
+        const FDSHMcpGraphSnapshot* Snapshot = Before.FindByPredicate(
+            [Graph](const FDSHMcpGraphSnapshot& Item) { return Item.GraphPath == Graph->GetPathName(); });
+        if (!Snapshot) continue;
+        TSet<FString> Remaining;
+        for (UEdGraphNode* Node : Graph->Nodes)
+        {
+            if (!Node) continue;
+            const FString Id = Node->NodeGuid.ToString();
+            Remaining.Add(Id);
+            const FString* Previous = Snapshot->Nodes.Find(Id);
+            if (!Previous || *Previous != NodeText(Node)) Hint.NodeIds.AddUnique(Id);
+        }
+        FVector2D RemovedCenter = FVector2D::ZeroVector;
+        int32 RemovedCount = 0;
+        for (const auto& Entry : Snapshot->Positions)
+            if (!Remaining.Contains(Entry.Key)) { RemovedCenter += Entry.Value; ++RemovedCount; }
+        if (RemovedCount > 0 && !Hint.Center.IsSet()) Hint.Center = RemovedCenter / RemovedCount;
+    }
 }

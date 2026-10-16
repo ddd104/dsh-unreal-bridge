@@ -38,7 +38,8 @@ bool FDSHBlueprintRoundTrip::RunTest(const FString&)
     auto Default=MakeShared<FJsonObject>();Default->SetStringField(TEXT("op"),TEXT("set_pin_default"));Default->SetStringField(TEXT("nodeId"),TEXT("print1"));Default->SetStringField(TEXT("pin"),TEXT("InString"));Default->SetStringField(TEXT("value"),TEXT("Hello DSH"));
     FString BeginPlayId;
     for(const auto& G:Before->GetArrayField(TEXT("graphs")))for(const auto& N:G->AsObject()->GetArrayField(TEXT("nodes")))
-    {FString Function;if(N->AsObject()->TryGetStringField(TEXT("functionPath"),Function)&&Function==TEXT("/Script/Engine.Actor:ReceiveBeginPlay"))BeginPlayId=N->AsObject()->GetStringField(TEXT("id"));}
+    {FString Function;if(N->AsObject()->TryGetStringField(TEXT("functionPath"),Function)&&Function==TEXT("/Script/Engine.Actor:ReceiveBeginPlay"))
+        {BeginPlayId=N->AsObject()->GetStringField(TEXT("id"));TestTrue(TEXT("Unconnected default event is reported as a ghost"),N->AsObject()->GetBoolField(TEXT("isAutomaticallyPlacedGhostNode")));}}
     if(!TestFalse(TEXT("Existing BeginPlay node is present"),BeginPlayId.IsEmpty()))return false;
     auto From=MakeShared<FJsonObject>();From->SetStringField(TEXT("node"),BeginPlayId);From->SetStringField(TEXT("pin"),TEXT("then"));
     auto To=MakeShared<FJsonObject>();To->SetStringField(TEXT("node"),TEXT("print1"));To->SetStringField(TEXT("pin"),TEXT("execute"));
@@ -47,6 +48,15 @@ bool FDSHBlueprintRoundTrip::RunTest(const FString&)
     auto Preview=Ops.Execute(TEXT("preview_patch"),Patch,Code,Error);
     if(!TestTrue(TEXT("Preview and compile transient copy: ")+Error,Preview.IsValid()))return false;
     TestEqual(TEXT("Preview leaves original unchanged"),Ops.Execute(TEXT("read_blueprint"),ReadParams,Code,Error)->GetStringField(TEXT("revision")),Revision);
+    auto GraphRef=MakeShared<FJsonObject>();GraphRef->SetStringField(TEXT("refPath"),Created->GetStringField(TEXT("assetPath"))+TEXT(":EventGraph"));
+    auto DslArgs=MakeShared<FJsonObject>();DslArgs->SetObjectField(TEXT("graph"),GraphRef);
+    auto NullResult=MakeShared<FJsonObject>();NullResult->SetField(TEXT("returnValue"),MakeShared<FJsonValueNull>());
+    auto McpHints=FDSHMcpEditAdapter::FromCall(TEXT("write_graph_dsl"),DslArgs,NullResult);
+    if(!TestEqual(TEXT("Wrapped DSL graph reference identifies its asset"),McpHints.Num(),1))return false;
+    const auto GraphSnapshot=FDSHMcpEditAdapter::CaptureGraphs(McpHints);
+    if(!TestEqual(TEXT("Capture only the requested graph"),GraphSnapshot.Num(),1))return false;
+    auto NoChangeHints=McpHints;FDSHMcpEditAdapter::IncludeGraphChanges(NoChangeHints,GraphSnapshot);
+    TestTrue(TEXT("An unchanged graph has no changed-node hints"),NoChangeHints[0].NodeIds.IsEmpty());
     FDSHAssetViewHint ViewHint;
     auto Applied=Ops.Execute(TEXT("apply_patch"),Patch,Code,Error,&ViewHint);
     if(!TestTrue(TEXT("Apply and compile blueprint: ")+Error,Applied.IsValid()))return false;
@@ -55,6 +65,16 @@ bool FDSHBlueprintRoundTrip::RunTest(const FString&)
     TestTrue(TEXT("Committed edit identifies generated nodes"),ViewHint.NodeIds.Num()>0);
     TestNotEqual(TEXT("Edit changes revision"),Applied->GetStringField(TEXT("revision")),Revision);
     TestFalse(TEXT("Edit does not save automatically"),Applied->GetBoolField(TEXT("saved")));
+    FDSHMcpEditAdapter::IncludeGraphChanges(McpHints,GraphSnapshot);
+    TestTrue(TEXT("Null-result MCP write identifies the changed existing event"),McpHints[0].NodeIds.Contains(BeginPlayId));
+    TestEqual(TEXT("Focus includes only the connected event and new print node"),McpHints[0].NodeIds.Num(),2);
+    auto After=Ops.Execute(TEXT("read_blueprint"),ReadParams,Code,Error);
+    for(const auto& G:After->GetArrayField(TEXT("graphs")))for(const auto& N:G->AsObject()->GetArrayField(TEXT("nodes")))
+        if(N->AsObject()->GetStringField(TEXT("id"))==BeginPlayId)
+        {
+            TestFalse(TEXT("Connecting BeginPlay activates the ghost event"),N->AsObject()->GetBoolField(TEXT("isAutomaticallyPlacedGhostNode")));
+            TestEqual(TEXT("Connected BeginPlay is enabled"),N->AsObject()->GetStringField(TEXT("enabledState")),FString(TEXT("Enabled")));
+        }
     UBlueprint* Actual=LoadObject<UBlueprint>(nullptr,*Created->GetStringField(TEXT("assetPath")));
     TArray<UEdGraph*> ActualGraphs;Actual->GetAllGraphs(ActualGraphs);UEdGraphNode* CommentNode=ActualGraphs[0]->Nodes[0];const FString OriginalComment=CommentNode->NodeComment;
     CommentNode->NodeComment=TEXT("\u4F60\u597D");const FString FirstUnicodeRevision=FDSHBlueprintOps::Revision(Actual);
@@ -106,8 +126,25 @@ bool FDSHMcpPresentationHints::RunTest(const FString&)
     TestEqual(TEXT("Graph reference resolves to Blueprint asset"),Hints[0].AssetPath,FString(TEXT("/Game/Blueprints/BP_Test.BP_Test")));
     TestEqual(TEXT("Graph reference is preserved for navigation"),Hints[0].Graph,FString(TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph")));
     TestTrue(TEXT("Node position is available for centering"),Hints[0].Center.IsSet());
+    auto WrappedGraph=MakeShared<FJsonObject>();WrappedGraph->SetStringField(TEXT("refPath"),TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph"));
+    Graph->SetObjectField(TEXT("graph"),WrappedGraph);
+    Call->SetStringField(TEXT("tool_name"),TEXT("write_graph_dsl"));
+    Hints=FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result);
+    if(!TestEqual(TEXT("UE UObject graph wrapper identifies the asset"),Hints.Num(),1))return false;
+    TestEqual(TEXT("Wrapped graph retains its graph path"),Hints[0].Graph,FString(TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph")));
+    auto WrappedNode=MakeShared<FJsonObject>();WrappedNode->SetStringField(TEXT("refPath"),TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph.K2Node_CallFunction_0"));
+    auto NodeArgs=MakeShared<FJsonObject>();NodeArgs->SetObjectField(TEXT("node"),WrappedNode);
+    Call->SetStringField(TEXT("tool_name"),TEXT("set_node_property"));Call->SetObjectField(TEXT("arguments"),NodeArgs);
+    Hints=FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result);
+    if(!TestEqual(TEXT("Wrapped node reference identifies its Blueprint"),Hints.Num(),1))return false;
+    TestEqual(TEXT("Wrapped node identifies its graph"),Hints[0].Graph,FString(TEXT("/Game/Blueprints/BP_Test.BP_Test:EventGraph")));
+    TestTrue(TEXT("Wrapped node identifies the focus target"),Hints[0].NodeIds.Contains(TEXT("K2Node_CallFunction_0")));
+    Result->SetBoolField(TEXT("isError"),true);
+    TestTrue(TEXT("Failed wrapped calls do not produce focus hints"),FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result).IsEmpty());
+    Result->SetBoolField(TEXT("isError"),false);
     auto Material=MakeShared<FJsonObject>();
-    Material->SetStringField(TEXT("material_or_function"),TEXT("/Game/Materials/M_Test.M_Test"));
+    auto WrappedMaterial=MakeShared<FJsonObject>();WrappedMaterial->SetStringField(TEXT("refPath"),TEXT("/Game/Materials/M_Test.M_Test"));
+    Material->SetObjectField(TEXT("material_or_function"),WrappedMaterial);
     Material->SetNumberField(TEXT("x"),350);Material->SetNumberField(TEXT("y"),200);
     Call->SetStringField(TEXT("tool_name"),TEXT("add_expression"));Call->SetObjectField(TEXT("arguments"),Material);
     Hints=FDSHMcpEditAdapter::FromCall(TEXT("call_tool"),Call,Result);
@@ -128,9 +165,12 @@ bool FDSHAssetPresentationWindow::RunTest(const FString&)
     UBlueprint* Blueprint=LoadObject<UBlueprint>(nullptr,*Created->GetStringField(TEXT("assetPath")));
     if(!TestNotNull(TEXT("Created Blueprint is loaded"),Blueprint))return false;
     TArray<UEdGraph*> Graphs;Blueprint->GetAllGraphs(Graphs);
-    if(!TestTrue(TEXT("Blueprint has a graph"),Graphs.Num()>0))return false;
-    FDSHAssetViewHint Hint;Hint.AssetPath=Blueprint->GetPathName();Hint.Graph=Graphs[0]->GraphGuid.ToString();
-    if(Graphs[0]->Nodes.Num()>0)Hint.NodeIds.Add(Graphs[0]->Nodes[0]->NodeGuid.ToString());
+    UEdGraph* TargetGraph=nullptr;
+    for(UEdGraph* Graph:Graphs)if(Graph&&Graph->GetName()==TEXT("EventGraph"))TargetGraph=Graph;
+    if(!TestTrue(TEXT("Blueprint has an event graph with nodes"),TargetGraph&&TargetGraph->Nodes.Num()>=2))return false;
+    FDSHAssetViewHint Hint;Hint.AssetPath=Blueprint->GetPathName();Hint.Graph=TargetGraph->GetPathName();
+    Hint.NodeIds.Add(TargetGraph->Nodes[0]->NodeGuid.ToString());
+    Hint.NodeIds.Add(TargetGraph->Nodes[1]->NodeGuid.ToString());
     FDSHAssetPresentation Presentation;Presentation.Queue(Hint);Presentation.Tick();Presentation.Tick();
     UAssetEditorSubsystem* Editors=GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
     IAssetEditorInstance* Instance=Editors?Editors->FindEditorForAsset(Blueprint,false):nullptr;
@@ -141,7 +181,14 @@ bool FDSHAssetPresentationWindow::RunTest(const FString&)
     if(!TestTrue(TEXT("Asset editor has a window"),Window.IsValid()))return false;
     TestTrue(TEXT("Asset editor window is maximized"),Window->IsWindowMaximized());
     if(Instance->GetEditorName()==TEXT("BlueprintEditor"))
-        TestEqual(TEXT("Blueprint canvas shows the modified graph"),static_cast<FBlueprintEditor*>(Instance)->GetFocusedGraph(),Graphs[0]);
+    {
+        FBlueprintEditor* BlueprintEditor=static_cast<FBlueprintEditor*>(Instance);
+        TestEqual(TEXT("Blueprint canvas shows the modified graph"),BlueprintEditor->GetFocusedGraph(),TargetGraph);
+        const auto Selection=BlueprintEditor->GetSelectedNodes();
+        TestEqual(TEXT("Only the two changed nodes are selected for focus"),Selection.Num(),2);
+        TestTrue(TEXT("First changed node is focused"),Selection.Contains(TargetGraph->Nodes[0]));
+        TestTrue(TEXT("Second changed node is focused"),Selection.Contains(TargetGraph->Nodes[1]));
+    }
     return true;
 }
 
