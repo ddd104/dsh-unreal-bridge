@@ -1,10 +1,10 @@
-# DSH Unreal Bridge 0.2.1
+# DSH Unreal Bridge 0.3.1
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 资产、关卡 Actor 或组件选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
 ## 本机安装
 
-本交付面向 Windows、已安装的 DSH 0.2.0-rc.2，以及 EHV 使用的 UEAS58（UE 5.8.0）。DSH 源码目录 `F:\AI\deepseek-harness` 用于核对扩展接口；插件独立安装到 DSH desktop 配置，不修改核心代码。UE 插件安装在 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。
+本交付面向 Windows、本机已安装的 DSH，以及 EHV 使用的 UEAS58（当前 UE 5.8.2）。DSH 源码目录 `F:\AI\deepseek-harness` 用于核对扩展接口；插件独立安装到 DSH desktop 配置，不修改核心代码。UE 插件安装在 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。旧版 0.2.0-rc.2 的验证保留在历史记录中；视觉功能另已核对实际安装的 0.2.1-rc.1 组件接口。
 
 Git 仓库包含 DSH 与 UE 插件源码。UE DLL 由目标引擎编译；知识模块使用安装时准备的 Node.js 24.15.0 和已编译工具。
 
@@ -35,6 +35,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 关卡选区包含对象类型、名称、显示名、实例路径、世界路径，以及可用的类蓝图路径；组件还包含所属 Actor。实例属性操作使用实例路径；修改类蓝图逻辑使用蓝图资产路径。原生 Actor 或组件可能没有类蓝图。关卡选区同步需要 UE 插件声明 `level_selection` 能力，并配套更新 DSH 插件。
 
 Actor 蓝图编辑器内的组件显示为“蓝图组件”，同步组件模板路径、变量名、所属 Actor 蓝图及继承标记，不附加关卡实例路径。点击蓝图树中的 Actor 根项时显示蓝图资产；关闭当前蓝图后清空其选区。该功能需要 `blueprint_component_selection` 能力，并配套更新 DSH 插件。
+
+## 局部画面对比
+
+在当前对话绑定编辑器后，上传参考图（或提供本机图片路径），在关卡中选中一个 Actor/组件，然后说：“对比这张参考图与当前选中的物体，用中文说明差异。”也可以指定视口像素矩形，或要求先捕获当前画面作为基准。工具会返回对照图、可计算时的色差热图、指标和本机证据路径；支持图片的当前 DSH 模型直接读取持久化图片附件并解释，无需配置第二个模型服务。
+
+`unreal_visual_capture` 支持关卡实例、矩形区域与完整视口；`unreal_visual_compare` 支持外部设计图的辅助评审，以及已确认相同相机、尺度和曝光的截图回归。默认辅助评审保留 `unknown` 结论；回归模式只有显式确认条件一致时才给通过/失败。不同尺寸不拉伸配准，不做像素级验收。Actor 裁剪为包含背景与遮挡的包围矩形，不代表目标分割。
+
+只关心天空等局部区域的色彩、但两图构图或尺寸不同，可使用 `analysis: color_distribution`，分别指定参考图和当前截图的矩形区域。工具统计颜色均值/中位数、Lab 与线性相对亮度分布，保留咨询性结论，不把图像亮度比解释成曝光差。0.3.1 同时修复了 UE 相机负零数值触发 DSH 严格 JSON 输出校验的问题；这次只需更新 DSH 宿主，不需要重新编译 UE 插件。
+
+首版仅支持编辑器关卡视口、单帧 SDR PNG/JPEG/WebP 比较；不支持 PIE/UMG、蓝图预览组件、HDR、动态闪烁或自动调参。比较原图最多 8 Mi 像素，参考输入最多 20 MiB。图片或附件服务不可用时仍返回指标和证据路径，并明确说明模型没有看到图片。详情和参数见 [局部画面对比](docs/visual-comparison.md)。
 
 ## 项目图谱与资料
 

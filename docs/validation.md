@@ -112,3 +112,23 @@ UE 插件新增至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。没有改动 `E
 - 宿主构建及 26 项 JavaScript 测试通过。新增测试验证蓝图模板上下文完整传输、不混入关卡实例字段，并验证面板展示。
 - UE 5.8 编译、链接成功；`DSH.Bridge.BlueprintComponentSelection` 在隔离编辑器中通过，退出码 0。测试实际打开 Actor 蓝图，通过 Components 树的选择接口验证模板路径、变量名、所属蓝图、组件多选与切换、启动时已有选区、关闭当前窗口清空，以及关闭旧窗口不覆盖后来的 Content 选区。日志为 `.test-state/blueprint-component-selection-build-final.log` 和 `.test-state/blueprint-component-selection-automation.log`。
 - 本机引擎将 Blueprint Selection Notifier 标为内部接口，编译会有相应提示；本轮验证范围为当前 UE 5.8 构建。未将真实鼠标点选或其他引擎版本列为通过项。
+## 2026-10-17 局部画面对比（0.3.0）
+
+- `npm run check` 通过，68 项 JavaScript 测试覆盖图像算法、结果图库、附件持久化、真实 WebSocket 协议夹具、多对话截图排队、参考读取权限、取消与绑定变化。新增比较在主机范围排队，4K 原图比较实测约 3.27 秒、峰值 RSS 323 MiB。
+- 本机 UEAS58 已更新至 5.8.2。独立 HostProject 的三个模块完成编译和链接，完整目标构建通过 UE 官方流程重新生成当前 BuildId `717ce51e-7d91-490e-b61d-b7032ba4bce8`；没有手工更改引擎或插件 BuildId。首轮单模块构建未更新旧元数据，启动测试因此失败；完整目标构建后已解决。
+- 真实 D3D12 渲染自动化 `DSH.Bridge.VisualCapture.Projection`、`RenderedViewport`、`Validation` 全部成功，进程退出 0。覆盖 Actor/组件 PNG 裁剪、近裁面、离屏/后方目标、模板拒绝、矩形区域、文件不覆盖，以及选中轮廓/操作手柄恢复。日志 `.test-state/visual-automation-final.log`；报告 `.test-state/visual-automation-report-final/index.json`。
+- `scripts/visual-e2e.mjs` 在独立渲染编辑器中执行 7 项真实桥接验证并通过：能力发现、原图和元数据引用、同图回归通过、人为改色失败/热图、不同尺寸设计图不做像素判定、区域截图、无效目标不影响资产写入状态。结果 `.test-state/visual-e2e/result.json`。
+- 使用实际安装的 DSH 附件服务 0.2.1-rc.1 验证了 PNG 解码、原生图像块、JSON 历史回放与新服务实例重新读取；记录 `.test-state/visual-installed-runtime-check.json`。没有调用外部模型 API，所以本记录不把真实模型生成的中文评审列为已实测项。模型解释通过工具指南和原生双图输入接入当前对话。
+- 已安装到 DSH `desktop` 配置及 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。旧配置备份 `C:\Users\NiubilityPC\.dsh\profiles\desktop\.plugin-manager\dsh-unreal-bridge-backups\20261017-183800-887`；旧 UE 插件备份 `F:\UE5Project\EHV\Saved\DSHUnrealBridgeBackups\20261017-183800-887`。三个 DLL 和模块清单与独立工程验证版本 SHA-256 一致，记录 `.test-state/visual-installed-binaries.json`。已验证安装后的宿主模块可导入，sharp 0.35.5 在忽略安装脚本后仍可实际生成 PNG。
+- 当前 JavaScript 依赖审计无已知漏洞。场景资产未改动，没有结束或重新启动用户应用；应用重新打开后加载新版本。支持范围为编辑器视口、单帧 SDR；遮挡/背景仍可能包含在目标包围矩形内。
+
+## 2026-10-17 天空颜色任务日志复盘与宿主修复（0.3.1）
+
+- 依据 DSH 会话 `session-f9874096-5a85-4f76-8141-d08138fa1923` 的日志还原 18:51:50–18:55:07（上海时间）任务。两种视觉工具共三次返回 `ToolOutputError / INVALID_TOOL_OUTPUT: value is not lossless JSON`；用户后续明确只比较天空色彩后，模型未重试视觉工具，改用窗口截图与临时脚本。脱敏摘录 `.test-state/sky-log-audit.json` 保留原始行号。原日志未修改。
+- 日志只证明 DSH 拒绝返回值，不能单凭这条错误断定渲染或 UE 序列化失败。进一步检查本机已保存的三份原始 `capture.json`，均发现 `camera.rotation[2]` 是负零。使用实际安装的 DSH `ToolRuntime.execute` 及这份原始元数据重现了同一个输出错误；图片实际已成功生成。
+- 宿主将无渲染意义的 `-0` 规范为 `0`，省略可选对象字段中的 `undefined`。NaN、Infinity、函数、循环引用等保留严格拒绝，并在 `INVALID_VISUAL_OUTPUT` 中说明具体字段路径；没有采用会静默丢失数据的 JSON stringify 往返。图像附件持久引用与 `unknown`/`null` 均保留。`unreal_state.visualTools` 返回已加载版本及 revision，减少对旧回合失败状态的沿用。
+- 新增 `analysis: color_distribution` 与 `currentRegion`。不同尺寸的明确矩形区域可以比较颜色分布，不进行像素配准、SSIM/边缘合格判定或生成像素热图。原生像素统计 RGB 均值/中位数、Lab、线性 sRGB 相对亮度和分位数，不用棕色阈值选样本，不把图像相对亮度比当作曝光/照明强度之比。更新结果卡片、工具指南和参数说明。
+- 原任务临时脚本首次裁剪到了编辑器下方并报 TypeError，第二次又使用参考/当前不同的棕色阈值找区域。这些过程会影响样本。日志未读取光照控制器当前状态、实际混合权重或曝光，因而无法证实最终调参建议的因果链。指南要求将这些因素明确保留为待验证假设。
+- 使用当次已保存原图做独立矩形区域回放（按可见地平线选区，不按颜色筛选），不同尺寸下成功输出咨询统计、保留两图且不生成空间热图。记录 `.test-state/sky-color-replay-result.json`；结果仍受视角和云层构成影响，不代表物理参数验证。
+- `npm run check` 通过，80 项测试；新增实际负零回归、非法值字段路径、颜色分布、不同尺寸/区域、零亮度分母和卡片说明测试。实际安装的 DSH 0.2.1-rc.2 工具执行层验证通过：修复前复现拒绝，修复后截图和双图比较均通过 output schema/render 校验，并保留原生图片块。可复现脚本 `scripts/visual-runtime-check.mjs`，证据 `.test-state/visual-runtime-signed-zero-check.json`。未额外调用模型 API。
+- 本次仅更新 DSH 宿主 0.3.1，兼容已安装的 UE 0.3.0 截图接口；不需要重编译或替换 UE DLL。DSH 重启后加载新工具指南及实现。

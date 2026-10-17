@@ -3,6 +3,7 @@
 #include "DSHAssetPresentation.h"
 #include "DSHMcpEditAdapter.h"
 #include "DSHEditorSelection.h"
+#include "DSHVisualCapture.h"
 #include "IDSHUnrealBridgeMCPModule.h"
 #include "ProjectKnowledgeService.h"
 #include "AssetRegistry/AssetData.h"
@@ -111,7 +112,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message)
     {
@@ -136,6 +137,14 @@ private:
         const FString Id=Field(Message,TEXT("id")),Method=Field(Message,TEXT("method"));double Protocol=0;const TSharedPtr<FJsonObject>* ParamsPtr=nullptr;
         if(Id.IsEmpty()||Id.Len()>160||!Message->TryGetNumberField(TEXT("protocol"),Protocol)||Protocol!=1||!Message->TryGetObjectField(TEXT("params"),ParamsPtr)){Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("Invalid request envelope")));return;}
         const auto Params=*ParamsPtr;
+        if(Method==TEXT("visual_capture"))
+        {
+            FString CaptureError,CaptureCode;
+            const auto Result=FDSHVisualCapture::Capture(Params,CaptureError,CaptureCode);
+            auto Response=Result?MakeShared<FJsonObject>():Error(Id,CaptureCode,CaptureError);
+            if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
+            Send(Response);return;
+        }
         if(Method==TEXT("request_status"))
         {
             const FString QueryId=Field(Params,TEXT("requestId"));auto R=MakeShared<FJsonObject>();auto Result=MakeShared<FJsonObject>();Result->SetStringField(TEXT("status"),Results.Contains(QueryId)?TEXT("completed"):PendingMcp.Contains(QueryId)||PendingKnowledge.Contains(QueryId)?TEXT("pending"):RequestHashes.Contains(QueryId)?TEXT("expired"):TEXT("unknown"));if(Results.Contains(QueryId))Result->SetObjectField(TEXT("response"),Results[QueryId]);R->SetStringField(TEXT("type"),TEXT("response"));R->SetStringField(TEXT("id"),Id);R->SetBoolField(TEXT("ok"),true);R->SetObjectField(TEXT("result"),Result);Send(R);return;

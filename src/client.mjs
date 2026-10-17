@@ -1,5 +1,6 @@
 import React,{useEffect,useState} from 'react';
 import {TYPERT_REMOTE} from './remote.mjs';
+import {registerVisualToolviews} from './visual-client.mjs';
 
 const h=React.createElement;
 const colors={
@@ -96,6 +97,7 @@ export function UnrealDock({read,bind}) {
 
 export async function apply(ctx) {
   await ctx.remote.$mount(TYPERT_REMOTE);
+  registerVisualToolviews(ctx);
   ctx.inject(['remote.unrealBridge'],child=>{
     const using=(sessionId,call)=>child.sessions.using(sessionId,{source:'unrealBridge'},async reference=>{const state=reference.binding.session.getSnapshot();if(state.openState!=='open')throw state.openError??new Error('对话尚未就绪');const result=await call();if(!result.ok)throw new Error(result.error.message);return result.value;});
     child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>({read:()=>using(sessionId,()=>child.remote.unrealBridge.state(sessionId)),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId))})},UnrealDock));
