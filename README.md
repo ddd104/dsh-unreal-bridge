@@ -1,6 +1,6 @@
 # DSH Unreal Bridge 0.2.1
 
-DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
+DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 资产、关卡 Actor 或组件选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
 ## 本机安装
 
@@ -25,12 +25,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 ## 使用
 
 1. 打开 DSH 与 EHV。聊天输入框上方会出现 **Unreal Editor** 区域，选择 EHV 实例；每个对话分别选择。
-2. 在 UE 的 Content Browser 选中普通蓝图，返回 DSH 提问。选区变化只更新显示和本地缓存，不主动调用模型。
+2. 在 UE 的 Content Browser 选择资产，或在关卡视口、场景大纲中选择 Actor，也可在细节面板中选择 Actor 的组件。打开 Actor 蓝图后，在 Components 面板中点击组件也会同步。DSH 显示最近操作的选区；组件优先于其所属 Actor。支持多选及清空，选区变化只更新显示和本地缓存，不主动调用模型。
 3. 例如：“读取当前选中的蓝图，在 BeginPlay 后增加 PrintString，打印 Hello。先预览，确认后应用，不要保存。”
 4. 模型先读当前版本，再查询函数/引脚、生成补丁、预览并应用。安装配置中 `requireApproval: false` 时，应用不再弹出 DSH 批准提示。
 5. 检查编辑器后明确要求保存；也可要求撤销最近一次插件图修改。
 
 对其他资产提出查询、创建、修改或删除要求时，DSH 先列出 UE 5.8 MCP 工具集、读取目标工具的参数说明，再直接调用已绑定编辑器里的工具。无需生成 Python、Shell 或 Editor Utility 脚本。实际可用操作取决于工程启用的 UE 工具集；本机 EHV 已启用 `ModelContextProtocol` 与 `AllToolsets`。脚本执行型 MCP 工具在桥接层被拒绝。
+
+关卡选区包含对象类型、名称、显示名、实例路径、世界路径，以及可用的类蓝图路径；组件还包含所属 Actor。实例属性操作使用实例路径；修改类蓝图逻辑使用蓝图资产路径。原生 Actor 或组件可能没有类蓝图。关卡选区同步需要 UE 插件声明 `level_selection` 能力，并配套更新 DSH 插件。
+
+Actor 蓝图编辑器内的组件显示为“蓝图组件”，同步组件模板路径、变量名、所属 Actor 蓝图及继承标记，不附加关卡实例路径。点击蓝图树中的 Actor 根项时显示蓝图资产；关闭当前蓝图后清空其选区。该功能需要 `blueprint_component_selection` 能力，并配套更新 DSH 插件。
 
 ## 项目图谱与资料
 

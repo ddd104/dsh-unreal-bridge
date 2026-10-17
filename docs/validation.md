@@ -98,3 +98,17 @@ UE 插件新增至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。没有改动 `E
 - 宿主指引改为先读取当前完整图，再规划编辑；编译和一次图回读成功后结束。默认不启动 PIE；仅在明确要求运行时验证，或静态检查不足且已确认实例运行时使用。UE MCP 工具集说明支持按工具名过滤和只列简短名称，避免将整套 schema 溢出后再用命令行解析。
 - UE 补丁新增 `add_custom_event`，可与原生 `K2_SetTimerDelegate`、默认值和连线一起在一份预览补丁中提交。新 UE 实例通过 `custom_event_patch` 声明能力；旧实例继续使用原来的 UE MCP 路径。
 - 宿主构建和 23 项 JavaScript 测试通过，并已安装到 DSH `desktop` profile，重启 DSH 后加载。初次隔离 UE 构建因系统提交内存接近上限持续重试 PCH 编译而中止；用户关闭 EHV 编辑器后，利用 EHV 现有编译缓存成功编译、链接新模块。`DSH.Bridge.BlueprintTimerPatch` 自动化测试通过，覆盖自定义事件、定时器委托、预览不改原图、应用编译与回读；日志为 `.test-state/ehv-timer-build.log` 和 `.test-state/ehv-timer-automation.log`。EHV 已安装新的 UE DLL，重新打开编辑器后加载。尚无新流程的端到端模型耗时实测。
+
+## 2026-10-17 关卡 Actor 与组件选区同步
+
+- 现有选区事件新增 Actor 和组件实例，保留 Content Browser 资产格式。同步最近操作的选区，组件优先于所属 Actor；包含显示名、类、世界及实例路径、可用的类蓝图路径，组件额外包含所属 Actor。DSH 面板按类型显示，并把实例路径与蓝图路径的用途传给模型。
+- `npm run check` 成功，25 项 JavaScript 测试通过；新增测试覆盖场景选区字段保留、资产/实例切换、清空、乱序保护、对话隔离，以及 Actor/组件面板显示。
+- UE 5.8 隔离工程编译、链接成功；`DSH.Bridge.LevelSelection` 原生自动化测试通过，进程退出码 0。测试覆盖原生 Actor、多选、组件优先、取消选择、类蓝图与所属 Actor 蓝图、初始化已有选区、解除监听，以及禁用旧通知的 UE5 视口选择接口。日志为 `.test-state/level-selection-build-final.log` 和 `.test-state/level-selection-automation.log`。
+- 隔离工程通过真实 WebSocket 宣告 `level_selection`；使用已发现的 UE MCP `SelectActors` 选择已有 Actor，宿主收到 `SM_SkySphere` 的实例信息，随后收到双 Actor 选区和清空事件。事件记录为 `.test-state/selection-live-state/events.json`。组件链路已由原生事件测试及宿主协议/UI 测试覆盖，本轮未将真实鼠标点选组件列为通过项。
+
+## 2026-10-17 Actor 蓝图编辑器组件选区
+
+- 新增 Actor 蓝图编辑器 Components 面板同步，通过 Blueprint Selection Notifier 接收原有组件树的选择事件，支持组件切换与多选。同步模板路径、变量名、所属 Actor 蓝图和继承标记，使用 `source:"blueprint_editor"` 与关卡实例区分；DSH 面板显示“蓝图组件”和“所属蓝图”。只查询已有继承覆盖，不为选区同步创建组件覆盖。
+- 宿主构建及 26 项 JavaScript 测试通过。新增测试验证蓝图模板上下文完整传输、不混入关卡实例字段，并验证面板展示。
+- UE 5.8 编译、链接成功；`DSH.Bridge.BlueprintComponentSelection` 在隔离编辑器中通过，退出码 0。测试实际打开 Actor 蓝图，通过 Components 树的选择接口验证模板路径、变量名、所属蓝图、组件多选与切换、启动时已有选区、关闭当前窗口清空，以及关闭旧窗口不覆盖后来的 Content 选区。日志为 `.test-state/blueprint-component-selection-build-final.log` 和 `.test-state/blueprint-component-selection-automation.log`。
+- 本机引擎将 Blueprint Selection Notifier 标为内部接口，编译会有相应提示；本轮验证范围为当前 UE 5.8 构建。未将真实鼠标点选或其他引擎版本列为通过项。

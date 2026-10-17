@@ -14,6 +14,8 @@ const colors={
   error:'var(--dsw-alias-state-error-primary, #b91c1c)'
 };
 const assetName=path=>path.split('/').pop()?.split('.')[0]||path;
+const selectionName=item=>item.label||item.name||assetName(item.path);
+const selectionType=item=>item.kind==='actor'?'Actor':item.kind==='component'?(item.source==='blueprint_editor'?'蓝图组件':'组件'):'资产';
 
 export const inject=['slots','sessions','remote'];
 
@@ -50,6 +52,8 @@ export function UnrealDock({read,bind}) {
   const assets=state?.selection??[];
   const connected=!!state?.connected;
   const count=assets.length;
+  const types=[...new Set(assets.map(selectionType))];
+  const selectionLabel=types.length===1?types[0]:'对象';
 
   return h('section',{
     'aria-label':'Unreal Editor 工作区',
@@ -76,14 +80,15 @@ export function UnrealDock({read,bind}) {
           style:{display:'inline-flex',alignItems:'center',gap:7,padding:0,border:0,background:'none',color:colors.text,font:'inherit',fontWeight:500,cursor:'pointer',outlineColor:colors.accent}
         },
           h('span',{'aria-hidden':true,style:{color:colors.accent,fontSize:14}},'▣'),
-          `已选择 ${count} 个资产`,
+          `已选择 ${count} 个${selectionLabel}`,
           h('span',{'aria-hidden':true,style:{color:colors.muted,fontSize:10,transform:expanded?'rotate(180deg)':'none',transition:'transform 150ms'}},'▼'))
-        :h('span',{style:{color:colors.muted}},connected?'未选择资产 · 可在内容浏览器中选择':'连接项目后可查看所选资产')),
+        :h('span',{style:{color:colors.muted}},connected?'未选择对象 · 可在内容浏览器或关卡中选择':'连接项目后可查看所选对象')),
     count>0&&expanded?h('ul',{
-      id:'unreal-bridge-assets','aria-label':'已选择的资产',
+      id:'unreal-bridge-assets','aria-label':'已选择的对象',
       style:{boxSizing:'border-box',maxHeight:160,overflowY:'auto',overscrollBehavior:'contain',margin:'8px 0 0',padding:'4px 8px',listStyle:'none',border:`1px solid ${colors.border}`,borderRadius:8,backgroundColor:colors.surface}
     },assets.map((asset,index)=>h('li',{key:`${asset.path}-${index}`,style:{padding:'7px 5px',borderBottom:index<count-1?`1px solid ${colors.border}`:0,overflowWrap:'anywhere'}},
-      h('div',{style:{fontWeight:500,color:colors.text}},assetName(asset.path)),
+      h('div',{style:{fontWeight:500,color:colors.text}},`${selectionType(asset)} · ${selectionName(asset)}`),
+      asset.kind==='component'?h('div',{style:{marginTop:2,color:colors.muted,fontSize:11}},`${asset.source==='blueprint_editor'?'所属蓝图':'所属 Actor'}：${asset.ownerLabel||asset.ownerPath}`):null,
       h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},asset.path)))):null,
     state?.uncertain?h('div',{role:'status',style:{color:colors.warning,marginTop:7,overflowWrap:'anywhere'}},`上次操作结果待确认：${state.uncertain.requestId}`):null,
     error?h('div',{role:'alert',style:{color:colors.error,marginTop:7,overflowWrap:'anywhere'}},error):null);

@@ -56,7 +56,11 @@ host 监听 `ws://127.0.0.1:<port>/editor`。UE 从本地描述文件读取地�
 
 UE 首包 `hello` 包含 `protocol:1`、随机的进程生命周期 `editorId`、`project`、`projectPath`、`engineVersion`、`pid`、`capabilities`。host 返回 `hello_ack`。UE 推送 `{type:event,event,sequence,data}`；sequence 在每次重连时从零开始，旧序号被忽略。事件包括 `selection_changed` 与 `blueprint_changed`。
 
+`selection_changed.data.assets` 与 `unreal_state.selection` 表示最近操作的选区，最多 256 项。Content Browser 项保持 `{path,class}` 格式（也接受 `kind:"asset"`），兼容旧 UE 插件。支持 `level_selection` 的 UE 插件还会发送 `kind:"actor"` 或 `kind:"component"`，包含 `path`、`class`、`name`、`label`、`worldPath` 和可选的 `blueprintPath`。组件额外包含 `ownerPath`、`ownerLabel` 和可选的 `ownerBlueprintPath`。关卡项的 `path` 是活实例对象路径（可含 `:PersistentLevel`），不能作为蓝图资产路径传给图工具。选中组件时不重复发送其所属 Actor；清空关卡选区发送空数组，不回退到先前 Content Browser 选区。UE 在下一次桥接 tick 合并选择事件，重连后重新发送当前缓存。资产编辑器预览世界的 Actor 不属于关卡选区。
+
 命令格式：`{type:request,protocol:1,id,method,params}`。响应格式：`{type:response,id,ok:true,result}` 或 `{type:response,id,ok:false,error:{code,message}}`。引擎线程队列每帧处理有限请求，重连会丢弃旧连接排队消息。所有 UObject 读写在游戏线程执行。
+
+`blueprint_component_selection` 能力使用同一个选区事件，蓝图编辑器组件项为 `kind:"component",source:"blueprint_editor"`，包含 `path`（模板对象路径）、`class`、`name`、`label`、`componentVariableName`、`ownerLabel`、`ownerBlueprintPath`、`isInherited`，以及可选的组件类 `blueprintPath`。该项没有 `worldPath` 或 `ownerPath`；修改组件默认值应在 `ownerBlueprintPath` 中解析目标，继承组件不能直接按父类模板路径修改父资产。选择 Actor 根项时发送普通蓝图资产项；关闭当前蓝图清空选区，关闭旧蓝图不覆盖之后选中的 Content 或关卡对象。监听通过 UE 5.8 的 Blueprint Selection Notifier 注册，不替换蓝图编辑器已有的组件选择回调。
 
 写入以 UUID 去重。编辑器保留最多 10000 个写入参数摘要和最近 1024 个完整结果，达到日志上限时拒绝写入。DSH 缓存已完成结果，并在超时/断线/取消后标记结果未知，阻止当前对话继续写入，直到查到原始结果。日志是进程内日志，重启编辑器会丢失；连接重试不重放写入。
 

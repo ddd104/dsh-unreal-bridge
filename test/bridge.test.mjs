@@ -7,7 +7,7 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {WebSocket} from 'ws';
 import {UnrealBridge} from '../src/bridge.mjs';
-import {patchSchema} from '../src/protocol.mjs';
+import {patchSchema,selectionSchema} from '../src/protocol.mjs';
 import {apply} from '../src/index.mjs';
 
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
@@ -22,7 +22,32 @@ test('authentication rejects missing token and browser origins',async t=>{const 
 test('authenticated native UE loopback origin is accepted',async t=>{const b=await fixture(t);const ws=new WebSocket(b.descriptor.url,{headers:{Authorization:`Bearer ${b.token}`,Origin:'http://127.0.0.1'}});await once(ws,'open');ws.close();});
 test('two conversations keep independent instance and selection state',async t=>{const b=await fixture(t);const a=await editor(b,'A'),c=await editor(b,'B');b.bind('one','A');b.bind('two','B');a.send(JSON.stringify({type:'event',sequence:1,event:'selection_changed',data:{assets:[{path:'/Game/A.A',class:'Blueprint'}]}}));await pause(20);assert.equal(b.state('one').selection[0].path,'/Game/A.A');assert.deepEqual(b.state('two').selection,[]);assert.equal((await b.read('two',{assetPath:'/Game/B'})).echo,'read_blueprint');const closed=once(b.editors.get('B').ws,'close');c.close();await closed;assert.equal(b.state('two').editorId,'B');assert.equal(b.state('two').connected,false);});
 test('out-of-order events cannot restore stale selections',async t=>{const b=await fixture(t);const ws=await editor(b);b.bind('s','UE1');for(const sequence of [2,1])ws.send(JSON.stringify({type:'event',sequence,event:'selection_changed',data:{assets:[{path:`/Game/N${sequence}`,class:'Blueprint'}]}}));await pause(20);assert.equal(b.state('s').selection[0].path,'/Game/N2');});
+
+test('level selection preserves instance and Blueprint paths, replaces assets and clears independently per editor',async t=>{
+  const b=await fixture(t);const ws=await editor(b,'A');await editor(b,'B');b.bind('s','A');b.bind('other','B');
+  let sequence=0;
+  const send=async assets=>{const changed=once(b,'change');ws.send(JSON.stringify({type:'event',sequence:++sequence,event:'selection_changed',data:{assets}}));await changed;};
+  await send([{path:'/Game/BP_Car.BP_Car',class:'Blueprint'}]);
+  const actor={kind:'actor',path:'/Game/Maps/City.City:PersistentLevel.BP_Car_C_1',class:'/Game/BP_Car.BP_Car_C',name:'BP_Car_C_1',label:'测试车辆',worldPath:'/Game/Maps/City.City',blueprintPath:'/Game/BP_Car.BP_Car'};
+  await send([actor]);assert.deepEqual(b.state('s').selection,[actor]);
+  const component={kind:'component',path:actor.path+'.Mesh',class:'/Script/Engine.StaticMeshComponent',name:'Mesh',label:'Mesh',worldPath:actor.worldPath,ownerPath:actor.path,ownerLabel:actor.label,ownerBlueprintPath:actor.blueprintPath};
+  await send([component]);assert.deepEqual(b.state('s').selection,[component]);assert.deepEqual(b.state('other').selection,[]);
+  // A delayed actor event cannot overwrite a newer component selection.
+  ws.send(JSON.stringify({type:'event',sequence:sequence-1,event:'selection_changed',data:{assets:[actor]}}));
+  await send([]);assert.deepEqual(b.state('s').selection,[]);
+  await send([{path:'/Game/Another.Another',class:'Material'}]);assert.equal(b.state('s').selection[0].class,'Material');
+});
 test('patch schema rejects unknown ops, path escape and unknown fields',()=>{for(const p of [{...patch(),assetPath:'/Game/../Engine/X'},{...patch(),operations:[{op:'execute_shell',command:'x'}]},{...patch(),save:true}])assert.equal(patchSchema.safeParse(p).success,false);});
+
+test('Blueprint component selection retains template context without scene instance fields',async t=>{
+  const b=await fixture(t);const ws=await editor(b);b.bind('s','UE1');
+  const component={kind:'component',source:'blueprint_editor',path:'/Game/BP_Car.BP_Car_C:Sensor_GEN_VARIABLE',class:'/Script/Engine.SceneComponent',name:'Sensor_GEN_VARIABLE',label:'Sensor',componentVariableName:'Sensor',ownerLabel:'BP_Car',ownerBlueprintPath:'/Game/BP_Car.BP_Car',isInherited:false};
+  const changed=once(b,'change');ws.send(JSON.stringify({type:'event',sequence:1,event:'selection_changed',data:{assets:[component]}}));await changed;
+  assert.deepEqual(b.state('s').selection,[component]);
+  assert.equal(selectionSchema.safeParse({assets:[{...component,worldPath:'/Temp/Preview'}]}).success,false);
+  assert.equal(selectionSchema.safeParse({assets:[{...component,source:undefined}]}).success,false);
+  assert.equal(selectionSchema.safeParse({assets:[{...component,ownerBlueprintPath:undefined}]}).success,false);
+});
 test('patch schema accepts a named custom event and rejects invalid names',()=>{
   const add={op:'add_custom_event',nodeId:'timerEvent',eventName:'PrintTime'};
   assert.equal(patchSchema.safeParse({...patch(),operations:[add]}).success,true);

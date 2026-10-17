@@ -29,7 +29,14 @@ export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:m
 export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();
 export const knowledgeRecordSchema = z.object({tool:z.enum(['remember_evidence','experience_save','experience_feedback']),arguments:mcpArguments,requestId:z.string().uuid()}).strict();
 export const helloSchema = z.object({type:z.literal('hello'), protocol:z.literal(VERSION), editorId:id, project:z.string().min(1).max(512), projectPath:z.string().max(2048), engineVersion:z.string().max(80), pid:z.number().int().positive(), capabilities:z.array(id).max(64)}).strict();
-export const selectionSchema = z.object({assets:z.array(z.object({path:z.string().max(1024), class:z.string().max(256)}).strict()).max(256)}).strict();
+const selectionBase = {path:z.string().min(1).max(1024), class:z.string().min(1).max(1024)};
+const levelSelection = {...selectionBase, name:z.string().max(1024), label:z.string().max(1024), worldPath:z.string().max(1024), blueprintPath:z.string().max(1024).optional()};
+export const selectionSchema = z.object({assets:z.array(z.union([
+  z.object({...selectionBase, kind:z.literal('asset').optional()}).strict(),
+  z.object({...levelSelection, kind:z.literal('actor')}).strict(),
+  z.object({...levelSelection, kind:z.literal('component'), ownerPath:z.string().min(1).max(1024), ownerLabel:z.string().max(1024), ownerBlueprintPath:z.string().max(1024).optional()}).strict(),
+  z.object({...selectionBase, kind:z.literal('component'), source:z.literal('blueprint_editor'), name:z.string().max(1024), label:z.string().max(1024), componentVariableName:z.string().max(1024), ownerLabel:z.string().max(1024), ownerBlueprintPath:z.string().min(1).max(1024), isInherited:z.boolean(), blueprintPath:z.string().max(1024).optional()}).strict()
+])).max(256)}).strict();
 
 export class BridgeError extends Error {
   constructor(code,message,details={}) { super(message); this.name='BridgeError'; this.code=code; this.details=details; }

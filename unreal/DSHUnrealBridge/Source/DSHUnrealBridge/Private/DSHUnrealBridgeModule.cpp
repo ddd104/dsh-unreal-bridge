@@ -2,14 +2,13 @@
 #include "DSHBlueprintOps.h"
 #include "DSHAssetPresentation.h"
 #include "DSHMcpEditAdapter.h"
+#include "DSHEditorSelection.h"
 #include "IDSHUnrealBridgeMCPModule.h"
 #include "ProjectKnowledgeService.h"
 #include "AssetRegistry/AssetData.h"
 #include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "Containers/Queue.h"
-#include "ContentBrowserModule.h"
-#include "IContentBrowserSingleton.h"
 #include "Engine/Blueprint.h"
 #include "HAL/PlatformProcess.h"
 #include "IWebSocket.h"
@@ -50,11 +49,9 @@ public:
             Descriptor=FPaths::Combine(Root,TEXT("dsh-unreal-bridge/bridge.json"));
 #endif
         }
-        auto& CB=FModuleManager::LoadModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser"));
-        SelectionHandle=CB.GetOnAssetSelectionChanged().AddSP(AsShared(),&FDSHConnection::SelectionChanged);
+        EditorSelection.Start();
         TransactedHandle=FCoreUObjectDelegates::OnObjectTransacted.AddSP(AsShared(),&FDSHConnection::ObjectTransacted);
         PropertyHandle=FCoreUObjectDelegates::OnObjectPropertyChanged.AddSP(AsShared(),&FDSHConnection::PropertyChanged);
-        TArray<FAssetData> Selected;CB.Get().GetSelectedAssets(Selected);SelectionChanged(Selected,true);
         TickHandle=FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateSP(AsShared(),&FDSHConnection::Tick),0.1f);
         UE_LOG(LogDSHBridge,Display,TEXT("DSH bridge ready; waiting for local DSH host. Instance %s"),*EditorId);
     }
@@ -64,7 +61,7 @@ public:
         for (const auto& Pending : PendingKnowledge) FProjectKnowledgeService::Cancel(Pending.Value);
         PendingKnowledge.Reset();
         FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
-        if(FModuleManager::Get().IsModuleLoaded(TEXT("ContentBrowser")))FModuleManager::GetModuleChecked<FContentBrowserModule>(TEXT("ContentBrowser")).GetOnAssetSelectionChanged().Remove(SelectionHandle);
+        EditorSelection.Stop();
         FCoreUObjectDelegates::OnObjectTransacted.Remove(TransactedHandle);FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(PropertyHandle);
         if(Socket){Socket->OnConnected().Clear();Socket->OnConnectionError().Clear();Socket->OnClosed().Clear();Socket->OnMessage().Clear();Socket->Close();Socket.Reset();}
     }
@@ -75,8 +72,8 @@ private:
     double LastConnect=0;
     int64 Sequence=0;
     FTSTicker::FDelegateHandle TickHandle;
-    FDelegateHandle SelectionHandle,TransactedHandle,PropertyHandle;
-    TArray<TSharedPtr<FJsonValue>> Selection;
+    FDelegateHandle TransactedHandle,PropertyHandle;
+    FDSHEditorSelection EditorSelection;
     uint64 Generation=0;
     struct FIncoming { uint64 Generation; FString Message; };
     TQueue<FIncoming,EQueueMode::Mpsc> Inbox;
@@ -91,11 +88,7 @@ private:
     FDSHAssetPresentation Presentation;
     void Send(const TSharedPtr<FJsonObject>& O){if(Socket&&Socket->IsConnected())Socket->Send(Encode(O));}
     void Event(const FString& Name,const TSharedPtr<FJsonObject>& Data){if(!bAuthenticated)return;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("event"));O->SetStringField(TEXT("event"),Name);O->SetNumberField(TEXT("sequence"),++Sequence);O->SetObjectField(TEXT("data"),Data);Send(O);}
-    void SendSelection(){auto Data=MakeShared<FJsonObject>();Data->SetArrayField(TEXT("assets"),Selection);Event(TEXT("selection_changed"),Data);}
-    void SelectionChanged(const TArray<FAssetData>& Assets,bool bPrimary)
-    {
-        if(!bPrimary)return;Selection.Reset();for(const auto& Asset:Assets){if(Selection.Num()>=256)break;auto A=MakeShared<FJsonObject>();A->SetStringField(TEXT("path"),Asset.GetObjectPathString());A->SetStringField(TEXT("class"),Asset.AssetClassPath.ToString());Selection.Add(MakeShared<FJsonValueObject>(A));}SendSelection();
-    }
+    void SendSelection(){auto Data=MakeShared<FJsonObject>();Data->SetArrayField(TEXT("assets"),EditorSelection.GetSelection());Event(TEXT("selection_changed"),Data);}
     void Mark(UObject* Object){if(!Object)return;UBlueprint* BP=Cast<UBlueprint>(Object);if(!BP)BP=Object->GetTypedOuter<UBlueprint>();if(BP&&Watched.Contains(BP))Dirty.Add(BP);}
     void ObjectTransacted(UObject* Object,const FTransactionObjectEvent&){Mark(Object);}
     void PropertyChanged(UObject* Object,FPropertyChangedEvent&){Mark(Object);}
@@ -118,7 +111,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message)
     {
@@ -254,6 +247,7 @@ private:
     }
     bool Tick(float)
     {
+        if(EditorSelection.Tick())SendSelection();
         FIncoming Incoming;int32 Count=0;
         while(Count++<4&&Inbox.Dequeue(Incoming))
         {

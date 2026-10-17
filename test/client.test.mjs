@@ -36,3 +36,18 @@ test('old conversation responses cannot leak into a newly selected conversation'
   await act(async()=>{oldResolve({...fresh,selection:[{path:'/Game/PreviousConversationSecret'}]});});
   assert.equal(JSON.stringify(tree.toJSON()).includes('PreviousConversationSecret'),false);await act(async()=>tree.unmount());
 });
+
+test('dock identifies level actors and components by label and shows the component owner',async()=>{
+  const actor={kind:'actor',path:'/Game/Map.Map:PersistentLevel.Car_1',name:'Car_1',label:'测试车辆'};
+  const component={kind:'component',path:actor.path+'.Mesh',name:'Mesh',ownerPath:actor.path,ownerLabel:actor.label};
+  const template={kind:'component',source:'blueprint_editor',path:'/Game/BP_Car.BP_Car_C:Mesh_GEN_VARIABLE',label:'Mesh',ownerLabel:'BP_Car'};
+  for(const [item,summary,title] of [[actor,'1 个Actor','Actor · 测试车辆'],[component,'1 个组件','组件 · Mesh'],[template,'1 个蓝图组件','蓝图组件 · Mesh']]){
+    let tree;
+    await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>({version:1,connected:true,editors:[],selection:[item]}),bind:async()=>{}}));});
+    assert.match(JSON.stringify(tree.toJSON()),new RegExp(summary));
+    await act(async()=>tree.root.findByType('button').props.onClick());
+    const content=JSON.stringify(tree.toJSON());assert.ok(content.includes(title));assert.ok(content.includes(item.path));
+    if(item.kind==='component')assert.ok(content.includes(item.source==='blueprint_editor'?'所属蓝图：BP_Car':'所属 Actor：测试车辆'));
+    await act(async()=>tree.unmount());
+  }
+});
