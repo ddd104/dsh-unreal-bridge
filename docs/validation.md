@@ -1,5 +1,14 @@
 # 本机验证记录
 
+## 2026-10-19 蓝图编辑后自动布局
+
+- UE 插件新增 `automatic_graph_layout` 能力。原生补丁在整批编辑结束后整理目标函数或事件块，再编译并记录最终版本；布局纳入原编辑事务。UE MCP 成功调用通过编辑前后的图内容差异识别目标，返回前完成整理，并在 `dshLayout` 中报告最终版本、警告和独立撤销步骤。读取、撤销、显式移动及显式排版不重复触发整理。
+- 布局按执行、数据和委托依赖分层，处理循环、重路由、共享纯节点和嵌套注释。注释成员按原节点锚点确定，默认值变长时扩展原框；不依赖窗口或随机新 GUID。布局先规划后写入，坐标和工作规模检查失败时不留下部分坐标修改。功能范围是桥接工具编辑，不监听其他手工操作。
+- 宿主构建及 145 项 JavaScript 测试通过，记录 `.test-state/blueprint-layout-host-check.log`。UE 5.8.2 隔离 HostProject 完整 Editor 目标编译、链接通过，记录 `.test-state/blueprint-layout-build-final.log`。
+- UE 自动化 11/11 通过：新增 `DSH.Bridge.BlueprintLayout` 八组，覆盖拓扑与分支、事件及函数隔离、委托和共享纯节点、循环和注释、内容增长扩框、重复整理和新 GUID 稳定、坐标失败原子性、原生预览与一次撤销、MCP 多图与失败/移动排除；原 `BlueprintComponentSelection`、`BlueprintRoundTrip`、`BlueprintTimerPatch` 三组回归通过。报告 `.test-state/blueprint-layout-native-report/index.json`，日志 `.test-state/blueprint-layout-native.log`。
+- `scripts/blueprint-layout-e2e.mjs` 在隔离工程中通过 7 项真实桥接检查：能力声明、原生无坐标批量排版及最终版本、一次撤销恢复、MCP 显式移动保留、真实 `BlueprintTools.set_pin_value` 自动整理及版本和撤销说明、同请求去重、同值编辑无布局漂移。结果 `.test-state/blueprint-layout-e2e/result.json`；没有付费模型调用，也没有修改 EHV 蓝图资产。
+- 已更新 DSH desktop 和 EHV UE 插件；11 个 UE 文件及宿主构建产物哈希校验通过，知识配置和项目技能保持原值。实际安装的 DSH 运行时加载验证为 PASS。UE 备份 `F:/UE5Project/EHV/Saved/DSHUnrealBridgeBackups/20261019-172137-813/DSHUnrealBridge`，安装记录 `.test-state/blueprint-layout-installed.json`；需要重启 DSH 和 UE 才加载新代码。
+
 ## 2026-10-19 DataTable 原子写入与任务熔断
 
 - `npm run check` 构建成功，145/145 项 JavaScript 测试通过。新增覆盖危险路由在派发前拦截、原生复制幂等、旧插件拒绝、MCP 内层错误传播、回滚失败跨对话写锁，以及超时后查回失败仍保留写锁。执行保护覆盖跨工具与 UUID 变化、根调用去重、模型步骤、累计错误、计时器、并发预检及调用 Agent 取消接口。

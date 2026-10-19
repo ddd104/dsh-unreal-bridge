@@ -1,4 +1,5 @@
 #include "DSHBlueprintOps.h"
+#include "DSHBlueprintLayout.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Components/ActorComponent.h"
 #include "EdGraph/EdGraph.h"
@@ -141,7 +142,7 @@ bool FDSHBlueprintOps::Compile(UBlueprint* BP,FString& Error)
     return true;
 }
 
-bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObject>& Params,FString& Error,FDSHAssetViewHint* ViewHint)
+bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObject>& Params,FString& Error,FDSHAssetViewHint* ViewHint,FDSHBlueprintLayoutResult* LayoutResult)
 {
     UEdGraph* Graph=GraphOf(BP,Str(Params,TEXT("graph")));
     if(!Graph||!Graph->GetSchema()->IsA<UEdGraphSchema_K2>()) {Error=TEXT("A valid K2 graph name or graph GUID is required");return false;}
@@ -150,9 +151,13 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
     TMap<FString,UEdGraphNode*> Nodes; for(UEdGraphNode* N:Graph->Nodes)if(N)Nodes.Add(N->NodeGuid.ToString(),N);
     BP->Modify(); Graph->Modify(); for(UEdGraphNode* N:Graph->Nodes)if(N)N->Modify();
     TArray<FVector2D> EditedPositions;
-    auto MarkNode=[&](UEdGraphNode* Node,bool bSurvives=true)
+    TSet<UEdGraphNode*> LayoutSeeds;
+    bool bContentChanged=false;
+    auto MarkNode=[&](UEdGraphNode* Node,bool bSurvives=true,bool bArrange=true)
     {
-        if(!ViewHint||!Node)return;
+        if(!Node)return;
+        if(bArrange){bContentChanged=true;if(bSurvives)LayoutSeeds.Add(Node);}
+        if(!ViewHint)return;
         EditedPositions.Add(FVector2D(Node->NodePosX,Node->NodePosY));
         if(bSurvives)ViewHint->NodeIds.AddUnique(Node->NodeGuid.ToString());
     };
@@ -223,7 +228,10 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
         else if(!N){Error=TEXT("Node ID not found");return false;}
         else if(Kind==TEXT("remove_node"))
         {
-            if(!N->CanUserDeleteNode()){Error=TEXT("Node cannot be deleted");return false;}MarkNode(N,false);FBlueprintEditorUtils::RemoveNode(BP,N,true);Nodes.Remove(NodeId);continue;
+            if(!N->CanUserDeleteNode()){Error=TEXT("Node cannot be deleted");return false;}
+            // Capture the old neighbours before the schema breaks the deleted node's links.
+            for(UEdGraphPin* Pin:N->Pins)if(Pin)for(UEdGraphPin* Link:Pin->LinkedTo)if(Link)LayoutSeeds.Add(Link->GetOwningNode());
+            LayoutSeeds.Remove(N);MarkNode(N,false);FBlueprintEditorUtils::RemoveNode(BP,N,true);Nodes.Remove(NodeId);continue;
         }
         else if(Kind==TEXT("set_pin_default"))
         {
@@ -241,11 +249,21 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
             double X=0,Y=0;if(!(*Position)->TryGetNumberField(TEXT("x"),X)||!(*Position)->TryGetNumberField(TEXT("y"),Y)||!FMath::IsFinite(X)||!FMath::IsFinite(Y)||FMath::Abs(X)>100000||FMath::Abs(Y)>100000){Error=TEXT("Invalid node coordinates");return false;}
             N->NodePosX=static_cast<int32>(X);N->NodePosY=static_cast<int32>(Y);
         }
-        MarkNode(N);
+        MarkNode(N,true,Kind!=TEXT("move_node"));
     }
+    for(auto It=LayoutSeeds.CreateIterator();It;++It)if(!Graph->Nodes.Contains(*It))It.RemoveCurrent();
+    if(bContentChanged&&LayoutSeeds.IsEmpty()&&BP->FunctionGraphs.Contains(Graph))
+        for(UEdGraphNode* Node:Graph->Nodes)if(Node){LayoutSeeds.Add(Node);break;}
+    FDSHBlueprintLayoutResult Arranged;
+    if(bContentChanged&&!FDSHBlueprintLayout::Arrange(Graph,LayoutSeeds,Arranged,Error))return false;
+    if(LayoutResult)*LayoutResult=Arranged;
     if(ViewHint)
     {
         ViewHint->AssetPath=BP->GetPathName();ViewHint->Graph=Graph->GraphGuid.ToString();
+        // Layout changes coordinates, but the focus remains on the semantic edit.
+        TArray<FVector2D> FinalPositions;
+        for(UEdGraphNode* Node:Graph->Nodes)if(Node&&ViewHint->NodeIds.Contains(Node->NodeGuid.ToString()))FinalPositions.Add(FVector2D(Node->NodePosX,Node->NodePosY));
+        if(!FinalPositions.IsEmpty())EditedPositions=MoveTemp(FinalPositions);
         if(!EditedPositions.IsEmpty())
         {
             FVector2D Min=EditedPositions[0],Max=Min;
@@ -312,11 +330,17 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TS
     if(GEditor->PlayWorld||GEditor->IsTransactionActive()){ErrorCode=TEXT("BUSY");ErrorMessage=TEXT("Stop PIE or finish the current editor transaction first");return nullptr;}
     if(Method==TEXT("preview_patch")||Method==TEXT("apply_patch"))
     {
+        auto LayoutData=[](const FDSHBlueprintLayoutResult& Layout)
+        {
+            auto O=Obj();O->SetBoolField(TEXT("automatic"),true);O->SetNumberField(TEXT("movedNodes"),Layout.MovedNodes);O->SetNumberField(TEXT("resizedComments"),Layout.ResizedComments);O->SetBoolField(TEXT("undoSeparate"),false);return O;
+        };
+        FDSHBlueprintLayoutResult PreviewLayout;
         TStrongObjectPtr<UBlueprint> Copy(DuplicateForPreview(BP));
-        if(!Copy.IsValid()||!ApplyOperations(Copy.Get(),Params,ErrorMessage)||!Compile(Copy.Get(),ErrorMessage)){ErrorCode=TEXT("VALIDATION_FAILED");return nullptr;}
-        if(Method==TEXT("preview_patch")){auto O=Obj();O->SetBoolField(TEXT("valid"),true);O->SetStringField(TEXT("assetPath"),BP->GetPathName());O->SetStringField(TEXT("baseRevision"),Base);O->SetStringField(TEXT("message"),TEXT("Validated and compiled on a transient copy"));return O;}
+        if(!Copy.IsValid()||!ApplyOperations(Copy.Get(),Params,ErrorMessage,nullptr,&PreviewLayout)||!Compile(Copy.Get(),ErrorMessage)){ErrorCode=TEXT("VALIDATION_FAILED");return nullptr;}
+        if(Method==TEXT("preview_patch")){auto O=Obj();O->SetBoolField(TEXT("valid"),true);O->SetStringField(TEXT("assetPath"),BP->GetPathName());O->SetStringField(TEXT("baseRevision"),Base);O->SetStringField(TEXT("message"),TEXT("Validated, arranged and compiled on a transient copy"));O->SetObjectField(TEXT("layout"),LayoutData(PreviewLayout));return O;}
         const FString Label=TEXT("DSH Blueprint Edit ")+FGuid::NewGuid().ToString();bool Success=false;
-        {FScopedTransaction Tx(TEXT("DSHUnrealBridge"),FText::FromString(Label),BP);Success=ApplyOperations(BP,Params,ErrorMessage,ViewHint)&&Compile(BP,ErrorMessage);}
+        FDSHBlueprintLayoutResult AppliedLayout;
+        {FScopedTransaction Tx(TEXT("DSHUnrealBridge"),FText::FromString(Label),BP);Success=ApplyOperations(BP,Params,ErrorMessage,ViewHint,&AppliedLayout)&&Compile(BP,ErrorMessage);}
         const auto Context=GEditor->Trans->GetUndoContext();
         if(!Success)
         {
@@ -324,7 +348,7 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TS
             ErrorCode=Restored?TEXT("APPLY_FAILED_ROLLED_BACK"):TEXT("ROLLBACK_FAILED");if(!Restored)ErrorMessage+=TEXT("; automatic rollback was not possible; inspect the editor");return nullptr;
         }
         UndoTransactions.Add(BP->GetPathName(),Context.TransactionId);UndoRevisions.Add(BP->GetPathName(),Revision(BP));BP->MarkPackageDirty();
-        auto O=Read(BP,Params);O->SetBoolField(TEXT("saved"),false);O->SetBoolField(TEXT("compiled"),true);return O;
+        auto O=Read(BP,Params);O->SetBoolField(TEXT("saved"),false);O->SetBoolField(TEXT("compiled"),true);O->SetObjectField(TEXT("layout"),LayoutData(AppliedLayout));return O;
     }
     if(Method==TEXT("undo"))
     {

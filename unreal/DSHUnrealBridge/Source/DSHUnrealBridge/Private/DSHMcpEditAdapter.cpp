@@ -1,12 +1,19 @@
 #include "DSHMcpEditAdapter.h"
 
+#include "DSHBlueprintLayout.h"
+#include "DSHBlueprintOps.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphUtilities.h"
+#include "Editor.h"
+#include "Editor/Transactor.h"
 #include "Engine/Blueprint.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "ScopedTransaction.h"
 #include "Serialization/JsonSerializer.h"
 
 namespace
@@ -54,12 +61,46 @@ bool IsMutation(const FString& Name)
         TEXT("rename"), TEXT("connect"), TEXT("disconnect"), TEXT("assign"),
         TEXT("duplicate"), TEXT("paste"), TEXT("insert"), TEXT("apply"),
         TEXT("replace"), TEXT("clear"), TEXT("layout"), TEXT("write"),
-        TEXT("break"), TEXT("import"), TEXT("reimport"), TEXT("generate")};
+        TEXT("break"), TEXT("import"), TEXT("reimport"), TEXT("generate"), TEXT("retarget")};
     for (const FString& Verb : Verbs)
         if (Lower == Verb || Lower.EndsWith(TEXT(".") + Verb)
             || Lower.StartsWith(Verb + TEXT("_")) || Lower.Contains(TEXT(".") + Verb + TEXT("_"))
             || Lower.Contains(TEXT("_") + Verb + TEXT("_"))) return true;
     return false;
+}
+
+bool Succeeded(const TSharedPtr<FJsonObject>& Result)
+{
+    if (!Result.IsValid()) return false;
+    bool bError = false, bSuccess = true, bOk = true;
+    Result->TryGetBoolField(TEXT("isError"), bError);
+    Result->TryGetBoolField(TEXT("success"), bSuccess);
+    Result->TryGetBoolField(TEXT("ok"), bOk);
+    if (bError || !bSuccess || !bOk) return false;
+    // Some MCP implementations put their domain result in structuredContent.
+    // Only explicit status fields are authoritative; arbitrary strings and null
+    // returnValue are legitimate successful tool results.
+    const TSharedPtr<FJsonObject>* Structured = nullptr;
+    if (Result->TryGetObjectField(TEXT("structuredContent"), Structured) && Structured && Structured->IsValid())
+    {
+        (*Structured)->TryGetBoolField(TEXT("isError"), bError);
+        (*Structured)->TryGetBoolField(TEXT("success"), bSuccess);
+        (*Structured)->TryGetBoolField(TEXT("ok"), bOk);
+    }
+    return !bError && bSuccess && bOk;
+}
+
+void UnwrapCall(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments,
+    FString& ActualName, TSharedPtr<FJsonObject>& ToolArguments)
+{
+    ActualName = ToolName;
+    ToolArguments = Arguments;
+    if (ToolName == TEXT("call_tool") && Arguments.IsValid())
+    {
+        Arguments->TryGetStringField(TEXT("tool_name"), ActualName);
+        const TSharedPtr<FJsonObject>* Nested = nullptr;
+        if (Arguments->TryGetObjectField(TEXT("arguments"), Nested) && Nested && Nested->IsValid()) ToolArguments = *Nested;
+    }
 }
 
 FString NormalizeMcpAssetPath(const FString& Path)
@@ -112,6 +153,20 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
         {
             const FString Path = NormalizeMcpAssetPath(Text);
             if (!Path.IsEmpty()) Out.Assets.AddUnique(Path);
+            // Generic ObjectTools can address a node/graph through "object".
+            // Resolve the actual loaded type before treating it as a graph
+            // edit; a Blueprint/CDO/component property write is not enough.
+            if ((ParentKey == TEXT("object") || ParentKey == TEXT("instance")) && Text.Contains(TEXT(":")))
+            {
+                UObject* Referenced = FindObject<UObject>(nullptr, *Text);
+                if (const UEdGraphNode* Node = Cast<UEdGraphNode>(Referenced))
+                {
+                    Out.Nodes.AddUnique(Node->NodeGuid.ToString());
+                    if (Node->GetGraph() && Out.Graph.IsEmpty()) Out.Graph = Node->GetGraph()->GetPathName();
+                }
+                else if (const UEdGraph* Graph = Cast<UEdGraph>(Referenced))
+                    if (Out.Graph.IsEmpty()) Out.Graph = Graph->GetPathName();
+            }
         }
         else if (IsNodeKey(ParentKey) && !Text.IsEmpty() && Text.Len() <= 256)
         {
@@ -154,25 +209,42 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
         }
     }
 }
+
+bool IsGraphEdit(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments)
+{
+    FString ActualName;
+    TSharedPtr<FJsonObject> ToolArguments;
+    UnwrapCall(ToolName, Arguments, ActualName, ToolArguments);
+    if (!ToolArguments.IsValid() || !IsMutation(ActualName)) return false;
+    const FString Lower = ActualName.ToLower();
+    FString Leaf = Lower;
+    int32 LastDot = INDEX_NONE;
+    if (Lower.FindLastChar(TEXT('.'), LastDot)) Leaf = Lower.Mid(LastDot + 1);
+    // Explicit positioning/formatting and history operations express the user's
+    // own layout intent. Never immediately undo them with automatic formatting.
+    for (const TCHAR* Word : {TEXT("position"), TEXT("location"), TEXT("layout"), TEXT("arrange"),
+        TEXT("align"), TEXT("distribute"), TEXT("straighten"), TEXT("undo"), TEXT("redo")})
+        if (Leaf.Contains(Word)) return false;
+    if (Leaf == TEXT("move") || Leaf.StartsWith(TEXT("move_"))) return false;
+    FExtracted Input;
+    Extract(MakeShared<FJsonValueObject>(ToolArguments), FString(), Input);
+    // Blueprint-wide property/variable changes must not format every graph
+    // reconstructed by the editor. Require graph/node references or a graph
+    // operation in the actual method name, rather than the toolset prefix.
+    return !Input.Graph.IsEmpty() || !Input.Nodes.IsEmpty()
+        || Leaf.Contains(TEXT("graph")) || Leaf.Contains(TEXT("node")) || Leaf.Contains(TEXT("pin"))
+        || Leaf.Contains(TEXT("function")) || Leaf.Contains(TEXT("event")) || Leaf.Contains(TEXT("macro"));
+}
 }
 
 TArray<FDSHAssetViewHint> FDSHMcpEditAdapter::FromCall(const FString& ToolName,
     const TSharedPtr<FJsonObject>& Arguments, const TSharedPtr<FJsonObject>& Result)
 {
     TArray<FDSHAssetViewHint> Hints;
-    if (!Arguments.IsValid() || !Result.IsValid()) return Hints;
-    bool bError = false, bSuccess = true;
-    Result->TryGetBoolField(TEXT("isError"), bError);
-    Result->TryGetBoolField(TEXT("success"), bSuccess);
-    if (bError || !bSuccess) return Hints;
-    FString ActualName = ToolName;
-    TSharedPtr<FJsonObject> ToolArguments = Arguments;
-    if (ToolName == TEXT("call_tool"))
-    {
-        Arguments->TryGetStringField(TEXT("tool_name"), ActualName);
-        const TSharedPtr<FJsonObject>* Nested = nullptr;
-        if (Arguments->TryGetObjectField(TEXT("arguments"), Nested) && Nested && Nested->IsValid()) ToolArguments = *Nested;
-    }
+    if (!Arguments.IsValid() || !Succeeded(Result)) return Hints;
+    FString ActualName;
+    TSharedPtr<FJsonObject> ToolArguments;
+    UnwrapCall(ToolName, Arguments, ActualName, ToolArguments);
     if (!IsMutation(ActualName)) return Hints;
     FExtracted Input, Output;
     Extract(MakeShared<FJsonValueObject>(ToolArguments), FString(), Input);
@@ -225,7 +297,51 @@ FString NodeText(UEdGraphNode* Node)
     Nodes.Add(Node);
     FString Text;
     FEdGraphUtilities::ExportNodesToText(Nodes, Text);
-    return Text;
+    // Layout changes alone must not trigger another automatic layout. Keeping
+    // this comparison semantic also handles tools that reposition other nodes
+    // while adding or connecting their actual edit targets.
+    TArray<FString> Lines;
+    Text.ParseIntoArrayLines(Lines);
+    FString Semantic;
+    for (const FString& Line : Lines)
+    {
+        const FString Trimmed = Line.TrimStart();
+        if (Trimmed.StartsWith(TEXT("NodePosX=")) || Trimmed.StartsWith(TEXT("NodePosY="))
+            || Trimmed.StartsWith(TEXT("NodeWidth=")) || Trimmed.StartsWith(TEXT("NodeHeight="))) continue;
+        Semantic += Line + TEXT("\n");
+    }
+    return Semantic;
+}
+
+FDSHMcpGraphSnapshot SnapshotGraph(UEdGraph* Graph)
+{
+    FDSHMcpGraphSnapshot Snapshot;
+    if (const UBlueprint* Blueprint = Graph->GetTypedOuter<UBlueprint>()) Snapshot.AssetPath = Blueprint->GetPathName();
+    Snapshot.GraphPath = Graph->GetPathName();
+    Snapshot.GraphGuid = Graph->GraphGuid;
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (!Node) continue;
+        const FString Id = Node->NodeGuid.ToString();
+        Snapshot.Nodes.Add(Id, NodeText(Node));
+        Snapshot.Positions.Add(Id, FVector2D(Node->NodePosX, Node->NodePosY));
+        TArray<FString>& Neighbors = Snapshot.Neighbors.FindOrAdd(Id);
+        for (UEdGraphPin* Pin : Node->Pins)
+            if (Pin) for (UEdGraphPin* Linked : Pin->LinkedTo)
+                if (Linked && Linked->GetOwningNode() && Linked->GetOwningNode()->GetGraph() == Graph)
+                    Neighbors.AddUnique(Linked->GetOwningNode()->NodeGuid.ToString());
+    }
+    return Snapshot;
+}
+
+void ExtractCall(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments,
+    const TSharedPtr<FJsonObject>& Result, FExtracted& Input, FExtracted& Output)
+{
+    FString ActualName;
+    TSharedPtr<FJsonObject> ToolArguments;
+    UnwrapCall(ToolName, Arguments, ActualName, ToolArguments);
+    if (ToolArguments.IsValid()) Extract(MakeShared<FJsonValueObject>(ToolArguments), FString(), Input);
+    if (Result.IsValid()) Extract(MakeShared<FJsonValueObject>(Result), FString(), Output);
 }
 }
 
@@ -236,17 +352,209 @@ TArray<FDSHMcpGraphSnapshot> FDSHMcpEditAdapter::CaptureGraphs(const TArray<FDSH
     {
         UEdGraph* Graph = ResolveGraph(Hint);
         if (!Graph) continue;
-        FDSHMcpGraphSnapshot& Snapshot = Snapshots.AddDefaulted_GetRef();
-        Snapshot.GraphPath = Graph->GetPathName();
-        for (UEdGraphNode* Node : Graph->Nodes)
-        {
-            if (!Node) continue;
-            const FString Id = Node->NodeGuid.ToString();
-            Snapshot.Nodes.Add(Id, NodeText(Node));
-            Snapshot.Positions.Add(Id, FVector2D(Node->NodePosX, Node->NodePosY));
-        }
+        if (!Snapshots.ContainsByPredicate([Graph](const FDSHMcpGraphSnapshot& Item) { return Item.GraphPath == Graph->GetPathName(); }))
+            Snapshots.Add(SnapshotGraph(Graph));
     }
     return Snapshots;
+}
+
+TArray<FDSHMcpGraphSnapshot> FDSHMcpEditAdapter::CaptureCallGraphs(const FString& ToolName,
+    const TSharedPtr<FJsonObject>& Arguments)
+{
+    TArray<FDSHMcpGraphSnapshot> Snapshots;
+    if (!IsGraphEdit(ToolName, Arguments)) return Snapshots;
+    FExtracted Input, Output;
+    ExtractCall(ToolName, Arguments, nullptr, Input, Output);
+    // A function can be created, or several graphs edited, without a graph
+    // reference in the tool's return value. Snapshot all graphs of the explicitly
+    // addressed Blueprints, then use semantic differences to select the targets.
+    for (const FString& Path : Input.Assets)
+    {
+        UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Path);
+        TArray<UEdGraph*> Graphs;
+        if (Blueprint) Blueprint->GetAllGraphs(Graphs);
+        if (Graphs.IsEmpty())
+        {
+            // Keep the pre-call inventory even when the Blueprint has no
+            // graphs yet, or the explicitly requested new asset does not exist.
+            FDSHMcpGraphSnapshot Empty;
+            Empty.AssetPath = Path;
+            Snapshots.Add(MoveTemp(Empty));
+        }
+        for (UEdGraph* Graph : Graphs) if (Graph) Snapshots.Add(SnapshotGraph(Graph));
+    }
+    return Snapshots;
+}
+
+TArray<FDSHAssetViewHint> FDSHMcpEditAdapter::FinalizeCall(const FString& ToolName,
+    const TSharedPtr<FJsonObject>& Arguments, const TSharedPtr<FJsonObject>& Result,
+    const TArray<FDSHMcpGraphSnapshot>& Before)
+{
+    TArray<FDSHAssetViewHint> Hints = FromCall(ToolName, Arguments, Result);
+    if (!Succeeded(Result) || !IsGraphEdit(ToolName, Arguments)) return Hints;
+    FExtracted Input, Output;
+    ExtractCall(ToolName, Arguments, Result, Input, Output);
+    TArray<FString> Assets;
+    for (const FDSHMcpGraphSnapshot& Snapshot : Before) Assets.AddUnique(Snapshot.AssetPath);
+    TArray<TSharedPtr<FJsonValue>> Warnings;
+    for (const FString& Path : Output.Assets)
+        if (!Assets.Contains(Path) && FindObject<UBlueprint>(nullptr, *Path))
+            Warnings.Add(MakeShared<FJsonValueString>(Path
+                + TEXT(": Automatic layout was skipped because no pre-call graph inventory exists for this Blueprint.")));
+
+    struct FChangedGraph
+    {
+        UEdGraph* Graph = nullptr;
+        UBlueprint* Blueprint = nullptr;
+        TSet<UEdGraphNode*> Seeds;
+        FDSHAssetViewHint Hint;
+    };
+    TArray<FChangedGraph> Changed;
+    for (const FString& Path : Assets)
+    {
+        UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Path);
+        if (!Blueprint) continue;
+        TArray<UEdGraph*> Graphs;
+        Blueprint->GetAllGraphs(Graphs);
+        for (UEdGraph* Graph : Graphs)
+        {
+            if (!Graph) continue;
+            const FDSHMcpGraphSnapshot* Snapshot = Before.FindByPredicate([Graph, Blueprint](const FDSHMcpGraphSnapshot& Item)
+            {
+                return Item.AssetPath == Blueprint->GetPathName() && (Item.GraphPath == Graph->GetPathName()
+                    || (Item.GraphGuid.IsValid() && Item.GraphGuid == Graph->GraphGuid));
+            });
+            FChangedGraph Change;
+            Change.Graph = Graph;
+            Change.Blueprint = Blueprint;
+            Change.Hint.AssetPath = Blueprint->GetPathName();
+            Change.Hint.Graph = Graph->GetPathName();
+            TMap<FString, UEdGraphNode*> Current;
+            bool bChanged = false;
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (!Node) continue;
+                const FString Id = Node->NodeGuid.ToString();
+                Current.Add(Id, Node);
+                const FString* Previous = Snapshot ? Snapshot->Nodes.Find(Id) : nullptr;
+                if (!Previous || *Previous != NodeText(Node))
+                {
+                    Change.Seeds.Add(Node);
+                    Change.Hint.NodeIds.AddUnique(Id);
+                    bChanged = true;
+                }
+            }
+            FVector2D RemovedCenter = FVector2D::ZeroVector;
+            int32 RemovedCount = 0;
+            if (Snapshot) for (const auto& Entry : Snapshot->Nodes)
+            {
+                if (Current.Contains(Entry.Key)) continue;
+                bChanged = true;
+                if (const FVector2D* Position = Snapshot->Positions.Find(Entry.Key)) { RemovedCenter += *Position; ++RemovedCount; }
+                // A deleted event/block boundary is no longer available as a
+                // seed. Its surviving former neighbors identify the affected
+                // fragments, including pure-data and delegate connections.
+                if (const TArray<FString>* Neighbors = Snapshot->Neighbors.Find(Entry.Key))
+                    for (const FString& Neighbor : *Neighbors) if (UEdGraphNode** Node = Current.Find(Neighbor))
+                    {
+                        Change.Seeds.Add(*Node);
+                        Change.Hint.NodeIds.AddUnique(Neighbor);
+                    }
+            }
+            if (!bChanged) continue;
+            if (Change.Seeds.IsEmpty() && Blueprint->FunctionGraphs.Contains(Graph))
+                for (const auto& Entry : Current) Change.Seeds.Add(Entry.Value);
+            if (RemovedCount > 0 && Change.Hint.NodeIds.IsEmpty()) Change.Hint.Center = RemovedCenter / RemovedCount;
+            Changed.Add(MoveTemp(Change));
+        }
+    }
+
+    // No changed Blueprint graph means this was, for example, an asset property
+    // tool with a graph-looking argument. Preserve its own result untouched.
+    if (Changed.IsEmpty() && Warnings.IsEmpty()) return Hints;
+    auto Layout = MakeShared<FJsonObject>();
+    TArray<TSharedPtr<FJsonValue>> GraphResults;
+    int32 MovedNodes = 0, ResizedComments = 0, FailedGraphs = 0;
+    bool bUndoSeparate = false;
+    const bool bCanTransact = GEditor && GEditor->CanTransact() && GEditor->Trans
+        && !GEditor->Trans->IsActive() && !GIsTransacting;
+    // There is no public API to append to a completed MCP tool transaction.
+    // Never hold a transaction across the asynchronous tool call, or merge into
+    // an unrelated active editor operation. Layout gets its own undo step.
+    TUniquePtr<FScopedTransaction> Transaction;
+    if (bCanTransact && !Changed.IsEmpty()) Transaction = MakeUnique<FScopedTransaction>(FText::FromString(TEXT("Arrange edited Blueprint graphs")));
+    for (FChangedGraph& Change : Changed)
+    {
+        auto GraphResult = MakeShared<FJsonObject>();
+        GraphResult->SetStringField(TEXT("assetPath"), Change.Hint.AssetPath);
+        GraphResult->SetStringField(TEXT("graph"), Change.Hint.Graph);
+        FDSHBlueprintLayoutResult Arranged;
+        FString Error;
+        bool bArranged = false;
+        if (!bCanTransact) Error = TEXT("Automatic layout was skipped because an editor transaction is active or unavailable.");
+        else if (Change.Seeds.IsEmpty())
+        {
+            // The deleted isolated node has no remaining block to arrange.
+            bArranged = true;
+        }
+        else bArranged = FDSHBlueprintLayout::Arrange(Change.Graph, Change.Seeds, Arranged, Error);
+        if (!bArranged)
+        {
+            ++FailedGraphs;
+            if (Error.IsEmpty()) Error = TEXT("Automatic layout could not arrange this graph.");
+            GraphResult->SetStringField(TEXT("status"), bCanTransact ? TEXT("failed") : TEXT("skipped"));
+            GraphResult->SetStringField(TEXT("warning"), Error);
+            Warnings.Add(MakeShared<FJsonValueString>(Change.Hint.Graph + TEXT(": ") + Error));
+        }
+        else
+        {
+            GraphResult->SetStringField(TEXT("status"), Arranged.MovedNodes || Arranged.ResizedComments ? TEXT("applied") : TEXT("unchanged"));
+            MovedNodes += Arranged.MovedNodes;
+            ResizedComments += Arranged.ResizedComments;
+            if (Arranged.MovedNodes || Arranged.ResizedComments)
+            {
+                bUndoSeparate = true;
+                FBlueprintEditorUtils::MarkBlueprintAsModified(Change.Blueprint);
+                Change.Graph->NotifyGraphChanged();
+            }
+        }
+        GraphResult->SetNumberField(TEXT("movedNodes"), Arranged.MovedNodes);
+        GraphResult->SetNumberField(TEXT("resizedComments"), Arranged.ResizedComments);
+        GraphResults.Add(MakeShared<FJsonValueObject>(GraphResult));
+        // Derive focus targets before layout. Formatting neighboring nodes must
+        // not replace the nodes that the tool actually edited.
+        Hints.RemoveAll([&Change](const FDSHAssetViewHint& Hint)
+        {
+            return Hint.AssetPath == Change.Hint.AssetPath && (Hint.Graph.IsEmpty()
+                || Hint.Graph == Change.Hint.Graph || Hint.Graph == Change.Graph->GetName()
+                || Hint.Graph == Change.Graph->GraphGuid.ToString());
+        });
+        Hints.Add(Change.Hint);
+    }
+    if (Transaction && !bUndoSeparate) Transaction->Cancel();
+    Transaction.Reset();
+    Layout->SetStringField(TEXT("status"), Changed.IsEmpty() ? TEXT("skipped")
+        : FailedGraphs == Changed.Num() ? (bCanTransact ? TEXT("failed") : TEXT("skipped"))
+        : FailedGraphs || !Warnings.IsEmpty() ? TEXT("partial") : bUndoSeparate ? TEXT("applied") : TEXT("unchanged"));
+    Layout->SetNumberField(TEXT("movedNodes"), MovedNodes);
+    Layout->SetNumberField(TEXT("resizedComments"), ResizedComments);
+    Layout->SetBoolField(TEXT("undoSeparate"), bUndoSeparate);
+    Layout->SetArrayField(TEXT("graphs"), GraphResults);
+    Layout->SetArrayField(TEXT("warnings"), Warnings);
+    TArray<TSharedPtr<FJsonValue>> Revisions;
+    TSet<UBlueprint*> Recorded;
+    for (const FChangedGraph& Change : Changed)
+    {
+        if (Recorded.Contains(Change.Blueprint)) continue;
+        Recorded.Add(Change.Blueprint);
+        auto Revision = MakeShared<FJsonObject>();
+        Revision->SetStringField(TEXT("assetPath"), Change.Blueprint->GetPathName());
+        Revision->SetStringField(TEXT("revision"), FDSHBlueprintOps::Revision(Change.Blueprint));
+        Revisions.Add(MakeShared<FJsonValueObject>(Revision));
+    }
+    Layout->SetArrayField(TEXT("revisions"), Revisions);
+    Result->SetObjectField(TEXT("dshLayout"), Layout);
+    return Hints;
 }
 
 void FDSHMcpEditAdapter::IncludeGraphChanges(TArray<FDSHAssetViewHint>& Hints,

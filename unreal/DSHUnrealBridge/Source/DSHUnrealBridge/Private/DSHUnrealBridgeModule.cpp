@@ -118,7 +118,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("automatic_graph_layout")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message,const TSharedPtr<FJsonObject>& Details=nullptr)
     {
@@ -237,7 +237,7 @@ private:
             const TWeakPtr<FDSHConnection> Weak=AsShared();
             FString MCPError;
             const TSharedPtr<FJsonObject> ToolArguments=*ArgumentsPtr;
-            const auto Before=FDSHMcpEditAdapter::CaptureGraphs(FDSHMcpEditAdapter::FromCall(Name,ToolArguments,MakeShared<FJsonObject>()));
+            const auto Before=FDSHMcpEditAdapter::CaptureCallGraphs(Name,ToolArguments);
             const bool bStarted=IDSHUnrealBridgeMCPModule::Get().CallTool(Name,ToolArguments,Id,
                 [Weak,Id,bWrite,Name,ToolArguments,Before](TSharedPtr<FJsonObject> Result)
                 {
@@ -245,8 +245,7 @@ private:
                     {
                         if(auto Self=Weak.Pin())
                         {
-                            auto Hints=FDSHMcpEditAdapter::FromCall(Name,ToolArguments,Result);
-                            FDSHMcpEditAdapter::IncludeGraphChanges(Hints,Before);
+                            auto Hints=FDSHMcpEditAdapter::FinalizeCall(Name,ToolArguments,Result,Before);
                             for(const FDSHAssetViewHint& Hint:Hints)Self->Presentation.Queue(Hint);
                             Self->CompleteMcp(Id,Result,TEXT("MCP_TOOL_ERROR"),TEXT("MCP tool returned no result"),bWrite);
                         }

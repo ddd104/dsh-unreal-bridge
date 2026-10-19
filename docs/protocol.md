@@ -79,6 +79,10 @@ UE 同时跟踪最多 1024 个 Actor/组件句柄，达到上限时回收最久�
 
 其他操作为 `add_custom_event`（需要 UE 编辑器声明 `custom_event_patch` 能力，提供 `nodeId`、ASCII 标识符 `eventName` 和可选 `position`）、`remove_node`、`move_node` 和 `disconnect`。在同一补丁中，自定义事件的 `OutputDelegate` 引脚可连接 `/Script/Engine.KismetSystemLibrary:K2_SetTimerDelegate` 函数节点的 `Delegate` 输入，引脚 `Time` 和 `bLooping` 可用 `set_pin_default` 设置。新节点临时编号仅在当前补丁中有效，应用后重新读取持久节点 GUID 和 `customEventName`。
 
+声明 `automatic_graph_layout` 的编辑器在整批操作结束后整理受影响的 K2 图，再编译并计算最终 revision。函数图全图整理，事件图根据受影响节点及执行、数据、委托关联选择逻辑块。仅移动节点的补丁不触发布局；`add_node.position` 可作为初始定位，后续自动布局可调整坐标。预览与应用使用同一确定性算法，不依赖新节点随机 GUID 或窗口几何。原生结果增加 `layout:{automatic:true,movedNodes,resizedComments,undoSeparate:false}`；布局与修改在同一事务内，保存仍须显式请求。
+
+MCP 编辑在成功结果返回前，根据目标蓝图的图差异进行自动布局，通过附加 `dshLayout` 描述结果，不覆盖第三方工具的 `layout` 字段。MCP 布局不提供原生补丁的统一回滚保证；检查 `dshLayout` 的警告和撤销说明。读取、撤销、纯坐标移动和显式排版操作不触发二次自动布局。展示队列只操作视图，不延迟改写节点坐标。
+
 ## WebSocket v1
 
 host 监听 `ws://127.0.0.1:<port>/editor`。UE 从本地描述文件读取地址和令牌，在握手中提供 `Authorization: Bearer <token>`。允许 UE 原生客户端的回环 Origin；非回环来源被拒绝。浏览器 WebSocket 接口不能设置必需的 Authorization 头。

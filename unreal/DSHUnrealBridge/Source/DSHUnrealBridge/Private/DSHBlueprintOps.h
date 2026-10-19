@@ -5,6 +5,7 @@
 
 class UBlueprint;
 class UEdGraph;
+struct FDSHBlueprintLayoutResult;
 
 class FDSHBlueprintOps
 {
@@ -16,6 +17,6 @@ private:
     TMap<FString, FGuid> UndoTransactions;
     TMap<FString, FString> UndoRevisions;
     UBlueprint* Resolve(const FString& Path, FString& Error);
-    bool ApplyOperations(UBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Params, FString& Error, FDSHAssetViewHint* ViewHint = nullptr);
+    bool ApplyOperations(UBlueprint* Blueprint, const TSharedPtr<FJsonObject>& Params, FString& Error, FDSHAssetViewHint* ViewHint = nullptr, FDSHBlueprintLayoutResult* LayoutResult = nullptr);
     bool Compile(UBlueprint* Blueprint, FString& Error);
 };
