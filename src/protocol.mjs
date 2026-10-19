@@ -26,6 +26,7 @@ export const mcpArguments = z.record(z.string(),z.json());
 export const mcpDescribeSchema = z.object({toolsetName:mcpToolName,query:z.string().min(1).max(100).optional(),includeSchema:z.boolean().default(true)}).strict();
 export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
+export const dataTableCopySchema = z.object({assetPath,sourceRow:z.string().min(1).max(1024),propertyName:z.string().min(1).max(160).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),targetRows:z.array(z.string().min(1).max(1024)).min(1).max(4096).optional(),requestId:z.string().uuid()}).strict();
 export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();
 export const knowledgeRecordSchema = z.object({tool:z.enum(['remember_evidence','experience_save','experience_feedback']),arguments:mcpArguments,requestId:z.string().uuid()}).strict();
 export const imageRegionSchema=z.object({x:z.number().int().min(0),y:z.number().int().min(0),width:z.number().int().min(1).max(16384),height:z.number().int().min(1).max(16384)}).strict();
@@ -38,13 +39,24 @@ export const visualCompareSchema=z.object({referencePath:z.string().min(1).max(2
   if(value.checks&&new Set(value.checks).size!==value.checks.length)ctx.addIssue({code:'custom',message:'checks must contain unique check names'});
   if(value.analysis==='color_distribution'&&value.checks?.some(check=>check!=='color'))ctx.addIssue({code:'custom',message:'color_distribution supports only color checks; omit checks or use ["color"]'});
 });
+export const runtimeTargetSchema=z.object({playSessionId:id,worldId:id,objectId:id}).strict();
+export const runtimeMetadataSchema=runtimeTargetSchema.extend({pieInstance:z.number().int(),netMode:z.enum(['standalone','client','listen_server','dedicated_server']),status:z.enum(['running','paused'])}).strict();
+export const runtimeInvalidationSchema=runtimeTargetSchema.extend({reason:z.enum(['actor_destroyed','object_destroyed','world_unloaded','pie_ended','tracking_evicted'])}).strict();
+export const runtimeChangedSchema=z.object({playSessionId:id.nullable(),status:z.enum(['running','paused','stopped']),isSimulating:z.boolean(),invalidated:z.array(runtimeInvalidationSchema).max(4096)}).strict().superRefine((value,ctx)=>{
+  if((value.status==='stopped')!==(value.playSessionId===null))ctx.addIssue({code:'custom',message:'Stopped PIE has a null playSessionId; active PIE requires its playSessionId'});
+});
+export const runtimeSnapshotSchema=z.object({target:runtimeTargetSchema.optional(),properties:z.array(z.string().min(1).max(256)).max(100).optional(),maxProperties:z.number().int().min(1).max(200).default(80),includeComponents:z.boolean().default(true),maxComponents:z.number().int().min(1).max(32).default(16),collectionOffset:z.number().int().min(0).max(1000000).default(0),collectionLimit:z.number().int().min(1).max(100).default(20)}).strict().superRefine((value,ctx)=>{
+  if(value.properties&&value.properties.length>value.maxProperties)ctx.addIssue({code:'custom',message:'properties cannot contain more entries than maxProperties'});
+});
+export const runtimeHistorySchema=z.object({snapshotId:z.string().uuid().optional()}).strict();
+export const runtimeSnapshotResultSchema=z.object({target:runtimeMetadataSchema,path:z.string().min(1).max(1024),class:z.string().min(1).max(1024),worldPath:z.string().max(1024),name:z.string().max(1024),label:z.string().max(1024),kind:z.enum(['actor','component']),blueprintPath:z.string().max(1024).optional(),ownerBlueprintPath:z.string().max(1024).optional(),capturedAt:z.iso.datetime({offset:true}),sampledFrame:z.string().min(1).max(80),paused:z.boolean(),runtimeEvidence:z.literal(true),object:z.record(z.string(),z.json()),components:z.array(z.record(z.string(),z.json())).max(32)}).catchall(z.json());
 export const helloSchema = z.object({type:z.literal('hello'), protocol:z.literal(VERSION), editorId:id, project:z.string().min(1).max(512), projectPath:z.string().max(2048), engineVersion:z.string().max(80), pid:z.number().int().positive(), capabilities:z.array(id).max(64)}).strict();
 const selectionBase = {path:z.string().min(1).max(1024), class:z.string().min(1).max(1024)};
 const levelSelection = {...selectionBase, name:z.string().max(1024), label:z.string().max(1024), worldPath:z.string().max(1024), blueprintPath:z.string().max(1024).optional()};
 export const selectionSchema = z.object({assets:z.array(z.union([
   z.object({...selectionBase, kind:z.literal('asset').optional()}).strict(),
-  z.object({...levelSelection, kind:z.literal('actor')}).strict(),
-  z.object({...levelSelection, kind:z.literal('component'), ownerPath:z.string().min(1).max(1024), ownerLabel:z.string().max(1024), ownerBlueprintPath:z.string().max(1024).optional()}).strict(),
+  z.object({...levelSelection, kind:z.literal('actor'), runtime:runtimeMetadataSchema.optional()}).strict(),
+  z.object({...levelSelection, kind:z.literal('component'), ownerPath:z.string().min(1).max(1024), ownerLabel:z.string().max(1024), ownerBlueprintPath:z.string().max(1024).optional(), runtime:runtimeMetadataSchema.optional()}).strict(),
   z.object({...selectionBase, kind:z.literal('component'), source:z.literal('blueprint_editor'), name:z.string().max(1024), label:z.string().max(1024), componentVariableName:z.string().max(1024), ownerLabel:z.string().max(1024), ownerBlueprintPath:z.string().min(1).max(1024), isInherited:z.boolean(), blueprintPath:z.string().max(1024).optional()}).strict()
 ])).max(256)}).strict();
 

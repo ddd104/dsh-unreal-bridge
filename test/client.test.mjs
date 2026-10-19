@@ -51,3 +51,50 @@ test('dock identifies level actors and components by label and shows the compone
     await act(async()=>tree.unmount());
   }
 });
+
+test('dock identifies PIE worlds and network instances and reports paused simulation',async()=>{
+  const runtime={playSessionId:'play-a',worldId:'world-client-2',objectId:'actor-8',pieInstance:2,netMode:'client',status:'paused'};
+  const actor={kind:'actor',path:'/Game/UEDPIE_2_Map.Map:PersistentLevel.Car_1',label:'运行车辆',worldPath:'/Game/UEDPIE_2_Map.Map',runtime};
+  const state={version:1,editorId:'ue1',connected:true,editors:[],selection:[actor],runtime:{playSessionId:'play-a',status:'paused',isSimulating:true},runtimeSnapshots:[]};
+  let tree;
+  await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,bind:async()=>state}));});
+  let content=JSON.stringify(tree.toJSON());
+  assert.ok(content.includes('PIE 已暂停'));assert.ok(content.includes('模拟运行（SIE）'));assert.ok(content.includes('1 个运行 Actor'));
+  await act(async()=>tree.root.findByType('button').props.onClick());
+  content=JSON.stringify(tree.toJSON());
+  assert.ok(content.includes('运行 Actor · 运行车辆'));assert.ok(content.includes('PIE 实例 2 · 客户端 · 已暂停'));assert.ok(content.includes('世界：/Game/UEDPIE_2_Map.Map'));
+  await act(async()=>tree.unmount());
+});
+
+test('dock reports running and ended PIE without relabeling ordinary editor selection',async()=>{
+  for(const [status,expected] of [['running','PIE 运行中'],['stopped','PIE 未开始 / 已结束']]){
+    const state={version:1,editorId:'ue1',connected:true,editors:[],selection:[{kind:'actor',path:'/Game/Map.Map:PersistentLevel.Car_1',label:'编辑器车辆'}],runtime:{playSessionId:status==='stopped'?null:'play-a',status,isSimulating:false}};
+    let tree;
+    await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,bind:async()=>state}));});
+    const content=JSON.stringify(tree.toJSON());assert.ok(content.includes(expected));assert.ok(content.includes('1 个Actor'));assert.equal(content.includes('1 个运行 Actor'),false);
+    await act(async()=>tree.unmount());
+  }
+});
+
+test('dock keeps destroyed, ended and offline captures visibly historical, with capture time and a bounded list',async()=>{
+  const target={playSessionId:'old-play',worldId:'old-world',objectId:'old-actor',pieInstance:0,netMode:'standalone',status:'running'};
+  const base={editorId:'ue1',project:'EHV',target,path:'/Game/Map.Map:PersistentLevel.Enemy_1',capturedAt:'2026-10-17T04:05:06.000Z',sampledFrame:123};
+  const captures=[
+    ...Array.from({length:20},(_,index)=>({...base,snapshotId:`extra-${index}`,label:`额外快照${index}`,status:'available'})),
+    {...base,snapshotId:'d',label:'回收前现场',status:'expired',reason:'tracking_evicted'},
+    {...base,snapshotId:'a',label:'销毁前现场',status:'expired',reason:'actor_destroyed'},
+    {...base,snapshotId:'b',label:'结束前现场',status:'expired',reason:'pie_ended'},
+    {...base,snapshotId:'c',label:'断线前现场',status:'disconnected'}
+  ];
+  const state={version:1,editorId:'ue1',connected:false,editors:[],selection:[],runtime:null,runtimeSnapshots:captures};
+  let tree;
+  await act(async()=>{tree=Renderer.create(React.createElement(UnrealDock,{read:async()=>state,bind:async()=>state}));});
+  const content=JSON.stringify(tree.toJSON());
+  assert.ok(content.includes('PIE 状态未知 · 编辑器已离线'));assert.ok(content.includes('运行历史快照'));assert.ok(content.includes('不随运行自动更新'));
+  assert.ok(content.includes('Actor 已销毁'));assert.ok(content.includes('本次 PIE 已结束'));assert.ok(content.includes('编辑器已离线'));assert.ok(content.includes('跟踪句柄已回收'));assert.ok(content.includes('销毁前现场'));assert.ok(content.includes('帧 123'));
+  const list=tree.root.findByProps({'aria-label':'最近采集的运行快照'});assert.equal(list.findAllByType('li').length,20);assert.equal(list.props.style.overflowY,'auto');
+  assert.equal(tree.root.findAllByType('time')[0].props.dateTime,base.capturedAt);assert.equal(content.includes('额外快照0'),false);assert.ok(content.includes('额外快照19'));
+  assert.equal(list.findAllByType('li')[0].findAllByType('div')[0].children[0],'断线前现场');
+  assert.equal(tree.root.findAllByType('button').length,0);
+  await act(async()=>tree.unmount());
+});

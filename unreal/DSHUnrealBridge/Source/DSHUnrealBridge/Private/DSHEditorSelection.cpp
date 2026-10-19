@@ -1,4 +1,5 @@
 #include "DSHEditorSelection.h"
+#include "DSHRuntimeInspector.h"
 
 #include "AssetRegistry/AssetData.h"
 #include "BlueprintEditor.h"
@@ -25,8 +26,8 @@ namespace
 {
 bool IsLevelActor(const AActor* Actor)
 {
-    return IsValid(Actor) && !Actor->IsTemplate() && Actor->GetWorld()
-        && Actor->GetWorld()->WorldType == EWorldType::Editor;
+    return IsValid(Actor) && !Actor->IsActorBeingDestroyed() && !Actor->IsTemplate() && Actor->GetWorld()
+        && (Actor->GetWorld()->WorldType == EWorldType::Editor || Actor->GetWorld()->WorldType == EWorldType::PIE);
 }
 
 void AddBlueprint(const UObject* Object, const TCHAR* Field, const TSharedRef<FJsonObject>& Entry)
@@ -210,7 +211,7 @@ TArray<TSharedPtr<FJsonValue>> FDSHEditorSelection::ReadLevelSelection()
 {
     TArray<TSharedPtr<FJsonValue>> Entries;
     if (!GEditor) return Entries;
-    auto Append = [&Entries](USelection* Selected, bool bComponents)
+    auto Append = [this, &Entries](USelection* Selected, bool bComponents)
     {
         if (!Selected) return;
         for (FSelectionIterator It(*Selected); It && Entries.Num() < 256; ++It)
@@ -219,6 +220,12 @@ TArray<TSharedPtr<FJsonValue>> FDSHEditorSelection::ReadLevelSelection()
             UActorComponent* Component = Cast<UActorComponent>(Object);
             AActor* Actor = bComponents ? (IsValid(Component) ? Component->GetOwner() : nullptr) : Cast<AActor>(Object);
             if (!IsValid(Object) || Object->IsTemplate() || !IsLevelActor(Actor)) continue;
+            TSharedPtr<FJsonObject> Runtime;
+            if (Actor->GetWorld()->WorldType == EWorldType::PIE)
+            {
+                Runtime = RuntimeInspector ? RuntimeInspector->Describe(Object) : nullptr;
+                if (!Runtime) continue;
+            }
             auto Entry = MakeShared<FJsonObject>();
             Entry->SetStringField(TEXT("path"), Object->GetPathName());
             Entry->SetStringField(TEXT("class"), Object->GetClass()->GetPathName());
@@ -226,6 +233,7 @@ TArray<TSharedPtr<FJsonValue>> FDSHEditorSelection::ReadLevelSelection()
             Entry->SetStringField(TEXT("name"), Object->GetName());
             Entry->SetStringField(TEXT("label"), bComponents ? Object->GetName() : Actor->GetActorLabel());
             Entry->SetStringField(TEXT("worldPath"), Actor->GetWorld()->GetPathName());
+            if (Runtime) Entry->SetObjectField(TEXT("runtime"), Runtime);
             AddBlueprint(Object, TEXT("blueprintPath"), Entry);
             if (bComponents)
             {

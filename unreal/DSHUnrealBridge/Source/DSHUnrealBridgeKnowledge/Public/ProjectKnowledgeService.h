@@ -20,6 +20,11 @@ public:
     static FString GetPluginDirectory();
     static FString GetCacheDirectory();
 
+    // Game-thread-only reflection of an already resolved live instance. Never loads an asset,
+    // resolves an object path or invokes a reflected function. Args uses properties,
+    // maxProperties (1..200), elementOffset and maxElements for bounded reads.
+    static TSharedPtr<FJsonObject> DescribeRuntimeObject(UObject* Object, UWorld* World, const TSharedPtr<FJsonObject>& Args);
+
     // 资产快照由游戏线程读取真实内存状态，缓存独立于图谱/记忆重建目录。
     static TSharedPtr<FJsonObject> CaptureAssetSnapshot(const FString& AssetPath, FString& Error);
     static TSharedPtr<FJsonObject> ReadCachedAssetSnapshot(const FString& AssetPath, FString& Error);

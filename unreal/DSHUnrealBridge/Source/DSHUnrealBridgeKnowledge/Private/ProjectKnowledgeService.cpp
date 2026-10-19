@@ -191,7 +191,7 @@ namespace ProjectKnowledge
         return MakeShared<FJsonValueString>(Text.Left(MaxText));
     }
 
-    TSharedPtr<FJsonObject> DescribeObject(UObject* Object, const TSharedPtr<FJsonObject>& Arguments)
+    TSharedPtr<FJsonObject> DescribeObject(UObject* Object, const TSharedPtr<FJsonObject>& Arguments, int32 PropertyLimit = MaxProperties)
     {
         // 顶层容器按属性分页，截断后可继续取证，不能把前 64 项误作完整候选。
         double OffsetValue = 0, LimitValue = MaxElements;
@@ -204,8 +204,8 @@ namespace ProjectKnowledge
         TSet<FString> Names;
         if (Arguments->HasField(TEXT("properties")))
         {
-            if (!Arguments->TryGetArrayField(TEXT("properties"), Requested) || Requested->Num() > MaxProperties)
-                return Error(TEXT("properties must be an array of at most 96 reflected property names."));
+            if (!Arguments->TryGetArrayField(TEXT("properties"), Requested) || Requested->Num() > PropertyLimit)
+                return Error(FString::Printf(TEXT("properties must be an array of at most %d reflected property names."), PropertyLimit));
             for (const TSharedPtr<FJsonValue>& Value : *Requested)
             {
                 FString Name;
@@ -236,7 +236,7 @@ namespace ProjectKnowledge
             if (Property->HasAnyPropertyFlags(CPF_Deprecated)) continue;
             if (!Names.IsEmpty() && !Names.Contains(Property->GetName())) continue;
             ++Available;
-            if (Values.Num() >= MaxProperties) continue;
+            if (Values.Num() >= PropertyLimit) continue;
             bool bTruncated = false;
             TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
             Entry->SetStringField(TEXT("name"), Property->GetName());
@@ -415,6 +415,18 @@ namespace ProjectKnowledge
         FPlatformProcess::ClosePipe(ReadInput, WriteInput);
         FPlatformProcess::ClosePipe(ReadError, WriteError);
     }
+}
+
+TSharedPtr<FJsonObject> FProjectKnowledgeService::DescribeRuntimeObject(UObject* Object, UWorld* World, const TSharedPtr<FJsonObject>& Args)
+{
+    check(IsInGameThread());
+    if (!Args.IsValid() || !ProjectKnowledge::InWorld(Object, World))
+        return ProjectKnowledge::Error(TEXT("Object does not belong to the supplied live World."));
+    double Limit = 80;
+    if ((Args->HasField(TEXT("maxProperties")) && !Args->TryGetNumberField(TEXT("maxProperties"), Limit)) ||
+        !FMath::IsFinite(Limit) || Limit < 1 || Limit > 200 || Limit != FMath::FloorToDouble(Limit))
+        return ProjectKnowledge::Error(TEXT("maxProperties must be an integer in 1..200."));
+    return ProjectKnowledge::DescribeObject(Object, Args, static_cast<int32>(Limit));
 }
 
 FString FProjectKnowledgeService::GetPluginDirectory()

@@ -1,8 +1,10 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
+#include "DSHDataTableOps.h"
 #include "DSHAssetPresentation.h"
 #include "DSHMcpEditAdapter.h"
 #include "DSHEditorSelection.h"
+#include "DSHRuntimeInspector.h"
 #include "DSHVisualCapture.h"
 #include "IDSHUnrealBridgeMCPModule.h"
 #include "ProjectKnowledgeService.h"
@@ -50,6 +52,8 @@ public:
             Descriptor=FPaths::Combine(Root,TEXT("dsh-unreal-bridge/bridge.json"));
 #endif
         }
+        RuntimeInspector.Start();
+        EditorSelection.SetRuntimeInspector(&RuntimeInspector);
         EditorSelection.Start();
         TransactedHandle=FCoreUObjectDelegates::OnObjectTransacted.AddSP(AsShared(),&FDSHConnection::ObjectTransacted);
         PropertyHandle=FCoreUObjectDelegates::OnObjectPropertyChanged.AddSP(AsShared(),&FDSHConnection::PropertyChanged);
@@ -63,6 +67,7 @@ public:
         PendingKnowledge.Reset();
         FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
         EditorSelection.Stop();
+        RuntimeInspector.Stop();
         FCoreUObjectDelegates::OnObjectTransacted.Remove(TransactedHandle);FCoreUObjectDelegates::OnObjectPropertyChanged.Remove(PropertyHandle);
         if(Socket){Socket->OnConnected().Clear();Socket->OnConnectionError().Clear();Socket->OnClosed().Clear();Socket->OnMessage().Clear();Socket->Close();Socket.Reset();}
     }
@@ -75,6 +80,7 @@ private:
     FTSTicker::FDelegateHandle TickHandle;
     FDelegateHandle TransactedHandle,PropertyHandle;
     FDSHEditorSelection EditorSelection;
+    FDSHRuntimeInspector RuntimeInspector;
     uint64 Generation=0;
     struct FIncoming { uint64 Generation; FString Message; };
     TQueue<FIncoming,EQueueMode::Mpsc> Inbox;
@@ -112,11 +118,11 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
-    TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message)
+    TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message,const TSharedPtr<FJsonObject>& Details=nullptr)
     {
-        auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("response"));O->SetStringField(TEXT("id"),Id);O->SetBoolField(TEXT("ok"),false);auto E=MakeShared<FJsonObject>();E->SetStringField(TEXT("code"),Code);E->SetStringField(TEXT("message"),Message);O->SetObjectField(TEXT("error"),E);return O;
+        auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("response"));O->SetStringField(TEXT("id"),Id);O->SetBoolField(TEXT("ok"),false);auto E=MakeShared<FJsonObject>();E->SetStringField(TEXT("code"),Code);E->SetStringField(TEXT("message"),Message);if(Details.IsValid())E->SetObjectField(TEXT("details"),Details);O->SetObjectField(TEXT("error"),E);return O;
     }
     void CompleteMcp(const FString& Id,const TSharedPtr<FJsonObject>& Result,const FString& Code,const FString& Message,bool bWrite)
     {
@@ -137,6 +143,15 @@ private:
         const FString Id=Field(Message,TEXT("id")),Method=Field(Message,TEXT("method"));double Protocol=0;const TSharedPtr<FJsonObject>* ParamsPtr=nullptr;
         if(Id.IsEmpty()||Id.Len()>160||!Message->TryGetNumberField(TEXT("protocol"),Protocol)||Protocol!=1||!Message->TryGetObjectField(TEXT("params"),ParamsPtr)){Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("Invalid request envelope")));return;}
         const auto Params=*ParamsPtr;
+        if(Method==TEXT("runtime_snapshot"))
+        {
+            FString RuntimeCode,RuntimeError;
+            auto Result=RuntimeInspector.Snapshot(Params,RuntimeCode,RuntimeError);
+            auto Response=Result?MakeShared<FJsonObject>():Error(Id,RuntimeCode,RuntimeError);
+            if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
+            if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("Request fewer runtime properties or components"));
+            Send(Response);return;
+        }
         if(Method==TEXT("visual_capture"))
         {
             FString CaptureError,CaptureCode;
@@ -161,7 +176,7 @@ private:
         }
         const FString KnowledgeTool=Method==TEXT("knowledge_call")?Field(Params,TEXT("tool")):FString();
         const bool bKnowledgeWrite=KnowledgeTool==TEXT("remember_evidence")||KnowledgeTool==TEXT("experience_save")||KnowledgeTool==TEXT("experience_feedback");
-        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||bKnowledgeWrite;
+        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||Method==TEXT("data_table_copy_property")||bKnowledgeWrite;
         if(bWrite)
         {
             const FTCHARToUTF8 Bytes(*(Method+Encode(Params)));const FString Hash=FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
@@ -241,9 +256,10 @@ private:
             if(!bStarted)CompleteMcp(Id,nullptr,TEXT("MCP_UNAVAILABLE"),MCPError,bWrite);
             return;
         }
-        FString Code,MessageText;FDSHAssetViewHint ViewHint;auto Result=Operations.Execute(Method,Params,Code,MessageText,&ViewHint);TSharedPtr<FJsonObject> Response;
+        FString Code,MessageText;FDSHAssetViewHint ViewHint;TSharedPtr<FJsonObject> ErrorDetails;
+        auto Result=Method==TEXT("data_table_copy_property")?FDSHDataTableOps::CopyProperty(Params,Code,MessageText,ErrorDetails):Operations.Execute(Method,Params,Code,MessageText,&ViewHint);TSharedPtr<FJsonObject> Response;
         if(Result){Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
-        else Response=Error(Id,Code,MessageText);
+        else Response=Error(Id,Code,MessageText,ErrorDetails);
         if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("Read a summary or filter by graph and nodeIds; response exceeds 2 MiB"));
         if(bWrite){Results.Add(Id,Response);ResultOrder.Add(Id);if(ResultOrder.Num()>1024){Results.Remove(ResultOrder[0]);ResultOrder.RemoveAt(0);}}
         Send(Response);
@@ -256,6 +272,11 @@ private:
     }
     bool Tick(float)
     {
+        if(RuntimeInspector.Tick())
+        {
+            EditorSelection.RefreshRuntimeSelection();
+            Event(TEXT("runtime_changed"),RuntimeInspector.GetEvent());
+        }
         if(EditorSelection.Tick())SendSelection();
         FIncoming Incoming;int32 Count=0;
         while(Count++<4&&Inbox.Dequeue(Incoming))
@@ -265,7 +286,7 @@ private:
             if(Message==TEXT("__connected")){Hello();continue;}
             if(Message==TEXT("__disconnected")){bConnecting=false;bAuthenticated=false;continue;}
             const auto O=Decode(Message);if(!O)continue;const FString Type=Field(O,TEXT("type"));
-            if(Type==TEXT("hello_ack")){bAuthenticated=true;SendSelection();continue;}
+            if(Type==TEXT("hello_ack")){bAuthenticated=true;Event(TEXT("runtime_changed"),RuntimeInspector.GetEvent());SendSelection();continue;}
             if(bAuthenticated&&Type==TEXT("request"))Request(O);
         }
         Presentation.Tick();

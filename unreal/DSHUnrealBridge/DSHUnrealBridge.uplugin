@@ -1,9 +1,9 @@
 {
   "FileVersion": 3,
-  "Version": 5,
-  "VersionName": "0.3.0",
+  "Version": 6,
+  "VersionName": "0.4.0",
   "FriendlyName": "DSH Unreal Bridge",
-  "Description": "Authenticated DSH bridge with UE MCP tools, project knowledge, asset snapshots and local viewport comparison.",
+  "Description": "Authenticated DSH bridge with PIE instance inspection, runtime snapshots, UE MCP tools, project knowledge and local viewport comparison.",
   "Category": "Editor",
   "CanContainContent": false,
   "EnabledByDefault": true,

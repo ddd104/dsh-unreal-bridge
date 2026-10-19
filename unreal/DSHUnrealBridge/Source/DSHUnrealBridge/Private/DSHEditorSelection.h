@@ -8,6 +8,7 @@ struct FAssetData;
 class USelection;
 class UTypedElementSelectionSet;
 class UAssetEditorSubsystem;
+class FDSHRuntimeInspector;
 
 // Tracks the most recently used selection source, without retaining scene objects.
 class FDSHEditorSelection : public IBlueprintSelectionNotifier
@@ -17,16 +18,19 @@ public:
     void Start();
     void Stop();
     bool Tick();
+    void SetRuntimeInspector(FDSHRuntimeInspector* Inspector) { RuntimeInspector = Inspector; }
+    void RefreshRuntimeSelection() { if (Source == ESource::Level) bPending = true; }
     const TArray<TSharedPtr<FJsonValue>>& GetSelection() const { return Selection; }
     void OnBlueprintSelectionUpdated(IAssetEditorInstance* Editor, UBlueprint* Blueprint, const TArray<FTypedElementHandle>& SelectedElements) override;
 
 private:
+    friend class FDSHRuntimeSelectionTest;
     void AssetsChanged(const TArray<FAssetData>& Assets, bool bPrimary);
     void LevelChanged(UObject* Object);
     void TypedLevelChanged(const UTypedElementSelectionSet* SelectionSet);
     void SelectionSetChanged(USelection* SelectionSet, UTypedElementSelectionSet* OldSet, UTypedElementSelectionSet* NewSet);
     void BindSelectionSets();
-    static TArray<TSharedPtr<FJsonValue>> ReadLevelSelection();
+    TArray<TSharedPtr<FJsonValue>> ReadLevelSelection();
     void BlueprintClosed(UObject* Asset, IAssetEditorInstance* Editor);
 
     FDelegateHandle AssetHandle, LevelHandle, ObjectHandle, SelectionSetHandle, MapHandle, BlueprintClosedHandle;
@@ -39,4 +43,5 @@ private:
     TWeakObjectPtr<UBlueprint> SelectedBlueprint;
     TArray<TSharedPtr<FJsonValue>> Selection, PendingAssets, PendingBlueprint;
     FString LastPayload;
+    FDSHRuntimeInspector* RuntimeInspector = nullptr;
 };

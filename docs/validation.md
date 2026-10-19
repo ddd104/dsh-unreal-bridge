@@ -1,5 +1,21 @@
 # 本机验证记录
 
+## 2026-10-19 DataTable 原子写入与任务熔断
+
+- `npm run check` 构建成功，145/145 项 JavaScript 测试通过。新增覆盖危险路由在派发前拦截、原生复制幂等、旧插件拒绝、MCP 内层错误传播、回滚失败跨对话写锁，以及超时后查回失败仍保留写锁。执行保护覆盖跨工具与 UUID 变化、根调用去重、模型步骤、累计错误、计时器、并发预检及调用 Agent 取消接口。
+- UE 5.8 隔离 HostProject 构建成功，`DSH.Bridge.DataTableCopy` 4/4 组原生测试通过，进程退出 0。验证嵌套 Map、向量、软引用、字符串和静态数组保留；真实变化监听器故意清空源 Map、修改无关字段和增行后，操作检测失败并恢复行数据、行集合及原 dirty 状态。已有未保存数据从操作前的内存恢复；一次撤销恢复全部目标。日志 `.test-state/write-safety-build.log`、`.test-state/write-safety-native.log`，报告 `.test-state/write-safety-native-report/index.json`。
+- `scripts/write-safety-runtime-check.mjs` 在实际安装的 DSH Electron/Node 24.21.0、Cordis 4.0.5、dsh-tools 0.2.1-rc.2 中运行，5 项离线验收通过，退出 0。真实工具管线证明：超预算调用不执行工具体；换工具和请求 ID 无法绕过；新宿主轮次可重新开始；即使外层 runtime 成功，内层 MCP 错误仍取消；普通源码搜索放行而真实输入脚本在执行前被挡；真实 `agent/pre-step` waterfall 执行步骤限制。记录 `.test-state/write-safety-runtime-check.json`。
+- 本轮未调用模型 API，未替换 DSH desktop 或 EHV 的已安装插件，未操作用户鼠标或修改 EHV 资产。宿主 bundle 与隔离工程 DLL 已构建；生效需要更新宿主与 UE 插件并重启相应应用。通用 MCP 工具不具备统一的原子回滚保证，遇错会结束任务并报告未验证状态，不能声称自动恢复。
+
+## 2026-10-19 工作区 UE 插件技能接入
+
+- `npm run check`：107 项 JavaScript 测试通过，其中 9 项技能测试覆盖工程/子目录发现、最近 `.uproject` 边界、跨工程隔离、目录和平铺技能、原生 YAML 调用策略、相对资源、同名覆盖优先级、正文重读、文件监测、首次安装后恢复和清理。
+- 用已安装 DSH 的 Electron Node 运行 `scripts/skills-runtime-check.mjs`，加载真实 Cordis、LocalFileSystem 和 SkillRegistry，并通过构建后的桥接 bundle 注册提供方。临时工程中验证发现、加载、切换工程隔离、正文更新、资源基目录与无编辑器连接读取，结果 `PASS`。
+- 同一检查以只读方式枚举并加载了 EHV 插件的 `sr-proto-handler`、`ue-project-graph`，路径均来自 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge\Skills`。没有调用模型、改写 EHV 文件或替换当前 DSH 安装；运行报告保存在本机 `.test-state/skills-runtime-check.json`。
+- 本次功能仅需更新 DSH 宿主 bundle 及依赖并重启 DSH；UE 编译与已有资产操作不涉及本次变更。UE 打包规则已扩为包含整个 `Skills/`，使新增技能及其资源随插件交付。
+
+## 历史交付验证
+
 日期：2026-10-14。交付版本：0.1.2。系统：Windows；Node：24.15.0；已安装 DSH：0.2.0-rc.2；引擎：UEAS58 / UE 5.8.0-0+UE5；目标工程：`F:\UE5Project\EHV\EHV.uproject`。
 
 ## 已通过的检查
@@ -132,3 +148,13 @@ UE 插件新增至 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。没有改动 `E
 - 使用当次已保存原图做独立矩形区域回放（按可见地平线选区，不按颜色筛选），不同尺寸下成功输出咨询统计、保留两图且不生成空间热图。记录 `.test-state/sky-color-replay-result.json`；结果仍受视角和云层构成影响，不代表物理参数验证。
 - `npm run check` 通过，80 项测试；新增实际负零回归、非法值字段路径、颜色分布、不同尺寸/区域、零亮度分母和卡片说明测试。实际安装的 DSH 0.2.1-rc.2 工具执行层验证通过：修复前复现拒绝，修复后截图和双图比较均通过 output schema/render 校验，并保留原生图片块。可复现脚本 `scripts/visual-runtime-check.mjs`，证据 `.test-state/visual-runtime-signed-zero-check.json`。未额外调用模型 API。
 - 本次仅更新 DSH 宿主 0.3.1，兼容已安装的 UE 0.3.0 截图接口；不需要重编译或替换 UE DLL。DSH 重启后加载新工具指南及实现。
+
+## 2026-10-17 PIE 实例诊断与生命周期（0.4.0）
+
+- PIE/SIE Actor 与组件选区附带独立运行、世界及对象句柄，保留编辑世界和蓝图组件原格式。按需 `unreal_runtime_snapshot` 同步读取反射属性、可用类默认值、继承关系、组件状态和引用，并记录 UTC 时间及帧号；不执行游戏函数，不自动采样。
+- 销毁、世界卸载和 EndPIE 使旧句柄失效，重开 PIE 不按名称或相同路径恢复目标。UE 使用弱引用及 1024 个句柄的 LRU 上限，回收通知为 `tracking_evicted`，并保护正在采样的主对象。DSH 每对话保留最近 20 份、总计最多 16 MiB 的历史；离线、解绑和切换编辑器后仍可读取已采集数据，不能冒充实时状态。
+- 宿主校验响应的真实连接、绑定版本及精确目标身份；运行结束或销毁先于响应到达时，快照保留为已失效历史。传输后的 JSON 递归校验拒绝非有限数值，再规范负零，覆盖 UE 变换和反射属性的严格 JSON 输出问题。两个新工具均为只读，`allowWrites:false` 下可用。
+- `npm run check` 通过，98/98 项测试，包括 15 项运行协议/生命周期测试和 7 项面板测试。覆盖同路径重新生成、旧会话/旧句柄、乱序、对话隔离、离线历史、读取期间 A→B→A 绑定切换、读取期间失效、负零、历史数量/字节上限以及句柄回收。
+- UE 5.8.2 的隔离 HostProject 完整 Editor 目标构建通过；记录 `.test-state/runtime-build-final.log`。`DSHUnrealBridge.Runtime` 三组及原 `LevelSelection`、`BlueprintComponentSelection` 共 5/5 通过，报告 `.test-state/runtime-native-final-report/index.json`。原生测试覆盖真实反射分页、跨世界拒绝、组件/Actor 销毁、世界卸载、1024 上限回收及采样主对象保护。
+- `scripts/runtime-e2e.mjs` 在隔离编辑器中启动两次实际 PIE/SIE 会话，7/7 项桥接验收通过：能力发现、Actor 与组件选区、暂停快照、销毁失效、重启同路径的新身份、EndPIE 不断线、编辑器退出后读取历史。证据 `.test-state/runtime-e2e-final/result.json` 与 `editor.log`，未调用付费模型。使用 NullRHI 验证运行与同步，未验证真实鼠标 F8 操作或画面渲染；测试日志中的无视口 SIE 切换警告不属于截图或视觉验收。
+- 本次未替换 DSH desktop 或 EHV 的已安装插件，也未修改 EHV 资产。源码、DSH bundle 和 UE 编译产物已准备；实际使用 0.4.0 时需要同时更新宿主与 UE 插件。执行 Trace、断点现场读取及 PIE 截图不在本次交付范围内。

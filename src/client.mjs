@@ -16,7 +16,12 @@ const colors={
 };
 const assetName=path=>path.split('/').pop()?.split('.')[0]||path;
 const selectionName=item=>item.label||item.name||assetName(item.path);
-const selectionType=item=>item.kind==='actor'?'Actor':item.kind==='component'?(item.source==='blueprint_editor'?'蓝图组件':'组件'):'资产';
+const selectionType=item=>item.kind==='actor'?(item.runtime?'运行 Actor':'Actor'):item.kind==='component'?(item.runtime?'运行组件':item.source==='blueprint_editor'?'蓝图组件':'组件'):'资产';
+const netModeLabel={standalone:'单机',client:'客户端',listen_server:'监听服务器',dedicated_server:'专用服务器'};
+const runtimeIdentity=target=>[`PIE 实例 ${target.pieInstance}`,netModeLabel[target.netMode]??target.netMode].filter(Boolean).join(' · ');
+const snapshotReason={actor_destroyed:'Actor 已销毁',object_destroyed:'对象已销毁',world_unloaded:'世界已卸载',pie_ended:'本次 PIE 已结束',tracking_evicted:'跟踪句柄已回收',session_changed:'运行会话已变化',editor_disconnected:'编辑器已离线'};
+const snapshotStatus=snapshot=>snapshot.status==='disconnected'?'编辑器已离线':snapshot.status==='expired'?(snapshotReason[snapshot.reason]??'运行目标已失效'):'已采集';
+const captureTime=value=>{const date=new Date(value);return Number.isNaN(date.getTime())?String(value):date.toLocaleString('zh-CN',{hour12:false});};
 
 export const inject=['slots','sessions','remote'];
 
@@ -55,6 +60,9 @@ export function UnrealDock({read,bind}) {
   const count=assets.length;
   const types=[...new Set(assets.map(selectionType))];
   const selectionLabel=types.length===1?types[0]:'对象';
+  const runtime=state?.runtime;
+  const snapshots=(state?.runtimeSnapshots??[]).slice(-20).reverse();
+  const runtimeLabel=!connected?(state?.editorId?'PIE 状态未知 · 编辑器已离线':'PIE 未开始'):!runtime?'PIE 状态暂不可用':runtime.status==='paused'?'PIE 已暂停':runtime.status==='running'?'PIE 运行中':'PIE 未开始 / 已结束';
 
   return h('section',{
     'aria-label':'Unreal Editor 工作区',
@@ -74,6 +82,7 @@ export function UnrealDock({read,bind}) {
       h('span',{role:'status',style:{display:'inline-flex',alignItems:'center',gap:6,flex:'0 0 auto',color:connected?colors.online:colors.muted,whiteSpace:'nowrap'}},
         h('span',{'aria-hidden':true,style:{width:6,height:6,borderRadius:'50%',backgroundColor:connected?colors.online:colors.muted}}),
         connected?'已连接':state?.editorId?'连接中断':'未连接')),
+    state&&Object.hasOwn(state,'runtime')?h('div',{'aria-label':'PIE 运行状态',role:'status',style:{marginTop:8,color:connected&&runtime?.status==='running'?colors.online:runtime?.status==='paused'?colors.warning:colors.muted}},runtimeLabel,runtime?.isSimulating?' · 模拟运行（SIE）':null):null,
     h('div',{style:{display:'flex',alignItems:'center',minHeight:28,marginTop:8,paddingTop:8,borderTop:`1px solid ${colors.border}`}},
       count>0
         ?h('button',{
@@ -90,7 +99,21 @@ export function UnrealDock({read,bind}) {
     },assets.map((asset,index)=>h('li',{key:`${asset.path}-${index}`,style:{padding:'7px 5px',borderBottom:index<count-1?`1px solid ${colors.border}`:0,overflowWrap:'anywhere'}},
       h('div',{style:{fontWeight:500,color:colors.text}},`${selectionType(asset)} · ${selectionName(asset)}`),
       asset.kind==='component'?h('div',{style:{marginTop:2,color:colors.muted,fontSize:11}},`${asset.source==='blueprint_editor'?'所属蓝图':'所属 Actor'}：${asset.ownerLabel||asset.ownerPath}`):null,
+      asset.runtime?h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},
+        h('div',null,`${runtimeIdentity(asset.runtime)} · ${asset.runtime.status==='paused'?'已暂停':'运行中'}`),
+        h('div',null,`世界：${asset.worldPath||asset.runtime.worldId}`)):null,
       h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},asset.path)))):null,
+    snapshots.length>0?h('div',{'aria-label':'运行历史快照',style:{marginTop:8,paddingTop:8,borderTop:`1px solid ${colors.border}`}},
+      h('div',{style:{fontWeight:500}},'运行历史快照'),
+      h('div',{style:{marginTop:3,color:colors.muted,fontSize:11,lineHeight:1.4}},'以下为按需采集的历史数据，不随运行自动更新；可继续分析已失效或离线目标。'),
+      h('ul',{'aria-label':'最近采集的运行快照',style:{maxHeight:180,overflowY:'auto',overscrollBehavior:'contain',margin:'6px 0 0',padding:0,listStyle:'none'}},
+        snapshots.map(snapshot=>h('li',{key:snapshot.snapshotId,style:{padding:'5px 0',overflowWrap:'anywhere'}},
+          h('div',{style:{fontWeight:500}},snapshot.label||assetName(snapshot.path),
+            h('span',{style:{marginLeft:6,fontWeight:400,color:snapshot.status==='available'?colors.muted:colors.warning}},snapshotStatus(snapshot))),
+          h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},
+            h('time',{dateTime:snapshot.capturedAt},captureTime(snapshot.capturedAt)),` · 帧 ${snapshot.sampledFrame}`,
+            snapshot.target?` · ${runtimeIdentity(snapshot.target)}`:null),
+          h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},[snapshot.project,snapshot.path].filter(Boolean).join(' · ')))))):null,
     state?.uncertain?h('div',{role:'status',style:{color:colors.warning,marginTop:7,overflowWrap:'anywhere'}},`上次操作结果待确认：${state.uncertain.requestId}`):null,
     error?h('div',{role:'alert',style:{color:colors.error,marginTop:7,overflowWrap:'anywhere'}},error):null);
 }
