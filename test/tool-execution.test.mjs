@@ -108,6 +108,9 @@ test('ObjectTools write failure reaches the model, then read-back and corrected 
   const state=await f.execute('unreal_state',{});
   assert.equal(state.executionSafety.errors,1);
   assert.equal(state.executionSafety.budgetExhausted,false);
-  assert.deepEqual(state.executionSafety.lastError,{code:'MCP_TOOL_ERROR',message:original,rollback:'not_available',recovery:'verify_before_retry'});
+  const {problem,...lastError}=state.executionSafety.lastError;
+  assert.deepEqual(lastError,{code:'MCP_TOOL_ERROR',message:original,rollback:'not_available',recovery:'verify_before_retry'});
+  assert.equal(problem.family,'object_properties');
+  assert.equal(state.executionSafety.repairs.issues[0].status,'resolved');
   assert.equal(f.cancellations.length,0);
 });

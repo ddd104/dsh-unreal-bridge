@@ -2,6 +2,12 @@
 
 DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端贡献 `conversation.input.dock`。不修改模型循环，不注册独立应用入口。模型可见的实时状态由工具返回，写入 DSH 的工具记录；选区事件不偷偷追加未记录的提示词。
 
+0.5.0 客户端另贡献官方 `plugins.row.config`，键为 `dsh-unreal-bridge#dsh-unreal-bridge`。宿主导出 Schemastery `Config`，可编辑字段标为 volatile，设置页通过宿主提供的 `form.state` / `form.mutate(ops, expectedRevision)` 保存，不提供模型配置写入工具。静态端口、目录和桌面输入策略不进入热设置表单。
+
+Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 共用状态投影。`executionSafety` 包含当前轮限制、剩余用量、`phase`、冻结的 `elapsedMs/endedAt` 和 `repairs`；单问题记录含 `target/family/status/repairAttempts/remainingAttempts/repeatedErrors/blockedBy`。`settings.nextTurnPending` 表示保存的预算与当前轮快照不同。`completed` 表示轮次已结束，不代表任务所有目标均已成功。单问题耗尽返回 `REPAIR_BUDGET_EXHAUSTED`、`scope:"problem"` 和 `canContinueIndependentWork:true`，不会耗用新的整轮错误额度或解锁未知写入。
+
+全局 Remote `cacheStatus()` 返回占用、策略、忙碌和扫描完整性；`cacheCleanup({mode:"policy"|"all_idle"})` 返回删除量与跳过原因。这两个入口不需要当前对话，也不作为模型工具。清理只管理插件自有视觉证据及轮转审计归档；`all_idle` 需要界面明确确认。普通状态刷新不触发磁盘统计。视觉结果增加 `expiresAt`；截图编号只在当前宿主进程有效，清理或过期后报告 `CAPTURE_EXPIRED`。
+
 项目技能使用 DSH 的 `skills`/`fs` 服务与原生 `FileSystemSkillProvider`，不经 WebSocket。提供方 `unreal-bridge-project` 按查询 `cwd` 向上定位最近的 `.uproject`，仅开放该工程的 `Plugins/DSHUnrealBridge/Skills`，发现与加载均校验工程归属。项目、自定义目录的同名技能先于插件技能（rank 350），插件技能先于用户全局技能。保留原生 YAML 调用控制、资源目录、正文重读和文件监测；UE 离线时也可加载。没有本机文件映射能力的文件系统不参与此提供方。
 
 ## 模型工具

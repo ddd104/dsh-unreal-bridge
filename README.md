@@ -1,10 +1,10 @@
-# DSH Unreal Bridge 0.4.5
+# DSH Unreal Bridge 0.5.0
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 资产、关卡 Actor 或组件选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
 ## 本机安装
 
-本交付面向 Windows、本机已安装的 DSH，以及 EHV 使用的 UEAS58（当前 UE 5.8.2）。DSH 源码目录 `F:\AI\deepseek-harness` 用于核对扩展接口；插件独立安装到 DSH desktop 配置，不修改核心代码。UE 插件安装在 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。旧版 0.2.0-rc.2 的验证保留在历史记录中；视觉功能另已核对实际安装的 0.2.1-rc.1 组件接口。
+本交付面向 Windows、DSH 0.2.1-rc.2，以及 EHV 使用的 UEAS58（当前 UE 5.8.2）。DSH 源码目录 `F:\AI\deepseek-harness` 用于核对扩展接口；插件独立安装到 DSH desktop 配置，不修改核心代码。UE 插件安装在 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。旧版 DSH 验证保留在历史记录中；0.5.0 的设置保存与热更新已通过实际安装的 0.2.1-rc.2 运行时核验。
 
 Git 仓库包含 DSH 与 UE 插件源码。UE DLL 由目标引擎编译；知识模块使用安装时准备的 Node.js 24.15.0 和已编译工具。
 
@@ -133,6 +133,29 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 ## 配置与排错
 
+### 设置页与执行状态
+
+在 DSH 的插件管理中打开 **DSH Unreal Bridge → 插件配置**，可设置写入权限、批准策略、单问题修复次数、连续相同错误上限、整轮预算、请求超时和缓存保留。编辑先保留为草稿，保存通过 DSH 官方配置编辑器原子写入 profile。“取消草稿”恢复最新保存值，“恢复默认”恢复安装配置的继承值，仍需保存。其他窗口修改过配置时，旧草稿不会覆盖新版本。
+
+| 设置 | 生效时机 |
+| --- | --- |
+| 工具次数、模型步骤、累计错误、总时限、单问题限制 | 下一轮任务首次 Unreal 调用；进行中的轮次保持原预算 |
+| 写入权限、批准策略、请求超时 | 后续请求；已派发请求继续按原超时等待 |
+| 缓存保留与容量 | 下一次清理；当前进程中已有截图公布的保留期限不因缩短设置而改变 |
+| 端口、状态目录、底层桌面输入策略 | 仍使用配置文件，修改后重启 |
+
+保存热设置不会重建连接、替换临时令牌或清除未知写入和回滚写锁。对话输入区新增可展开的执行状态，显示工具/步骤/错误用量、剩余时间、单问题修复状态和编辑器写入保护。轮次结束后冻结耗时，设置待下一轮生效时明确提示。界面和 `unreal_state` 使用同一状态投影；刷新只读取内存，不调用 UE 或扫描缓存。
+
+默认每个问题最多 **3 次修复写入**，相同错误最多连续出现 **2 次**。问题由宿主根据编辑器、目标资产和操作类型识别；首次失败后才消耗修复写入额度。预览不重复消耗写入次数，但反复相同的预览失败仍受连续错误限制。诊断读取、原请求状态查询不消耗修复次数，成功也不清零本轮已用额度。新 UUID、预览编号或同一 MCP 操作的不同调用入口不能重置额度。达到上限返回 `REPAIR_BUDGET_EXHAUSTED`，停止该项并保留证据，独立目标仍可继续；整轮预算和未知写入保护继续有效。设为 0 表示首次失败后不进行修复尝试。
+
+### 缓存管理与模块边界
+
+设置页可查看视觉证据与审计归档占用，执行“按已保存策略清理”，或确认后“清空闲置证据和归档”。默认视觉证据保留 30 天、容量目标 2048 MiB；审计归档保留 30 天、最多 10 份。启动时及每小时按策略维护。容量是可回收目标，已公布保留期内或正在使用的证据优先保留，超出容量时显示原因。手动清空可以使未到期的闲置截图编号提前失效。
+
+清理范围仅为宿主 `stateDir/visual` 下符合规则的证据目录和 `audit-<时间戳>.jsonl` 归档；不清理当前审计日志、连接信息、请求去重和写入保护状态、UE 资产或项目知识索引。链接、路径跳转和不认识的文件会被跳过。截图生成、比较、附件读取期间均持有保护；超时、取消后收到同一连接的迟到完成回包才释放远端生成保护，无法确认的断线生成保留到宿主退出。`captureId` 只在当前宿主进程及所属对话中有效；清理或过期后返回 `CAPTURE_EXPIRED`，需要重新截图。对话中已经保存的图片附件独立保留。
+
+模块职责已分开：`settings-spec/settings` 管理参数与官方保存机制，`execution-guard/repair-tracker` 管理轮次和问题额度，`operation-context` 派生操作身份，`state-service` 为界面和工具提供统一状态，`cache-manager` 管理缓存所有权和使用保护，`guide` 单独维护模型指引。可选宿主服务通过各自注入生命周期接入，新增或移除服务不重建桥接。
+
 ### 写入保护与循环控制
 
 复制 DataTable 列使用 `unreal_data_table_copy_property`，提供 `assetPath`、`sourceRow`、反射字段名 `propertyName` 和 UUID `requestId`；不提供 `targetRows` 时复制到其他所有行。UE 必须声明 `data_table_copy_property` 能力。缺少能力时停止该复制操作并说明需要更新插件，不回退到其他导入方式。嵌套 Map、软对象引用及浮点值直接复制，验证失败恢复操作前的内存值，包括已有未保存修改；不会从磁盘重载资产。
@@ -165,6 +188,14 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
     guardMaxSteps: 200
     guardMaxErrors: 50
     guardTimeoutMs: 1800000
+    guardMaxRepairAttempts: 3
+    guardMaxRepeatedErrors: 2
+    knowledgeTimeoutMs: 120000
+    visualTimeoutMs: 60000
+    visualCacheRetentionDays: 30
+    visualCacheMaxMiB: 2048
+    auditRetentionDays: 30
+    auditMaxArchives: 10
 ```
 
 连接描述文件默认位于 `%LOCALAPPDATA%\DSHUnrealBridge\bridge.json`，审计记录为同目录的 `audit.jsonl`。描述文件含临时令牌，请勿分享。Windows 使用当前用户目录的继承权限；不隔离同一 Windows 用户下的其他程序。

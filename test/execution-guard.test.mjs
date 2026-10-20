@@ -56,7 +56,7 @@ test('default calls continue past the old limits and stop at 300 with a model-vi
   assert.equal(denied.kind,'deny');assert.equal(denied.info.code,'EXECUTION_BUDGET_EXHAUSTED');
   const state=f.guard.status(f.session.id);
   assert.equal(state.toolCalls,300);assert.equal(state.remaining.toolCalls,0);assert.equal(state.phase,'summary');
-  assert.deepEqual(state.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000});
+  assert.deepEqual(state.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000,guardMaxRepairAttempts:3,guardMaxRepeatedErrors:2});
   assert.equal(f.cancellations.length,0);
 });
 

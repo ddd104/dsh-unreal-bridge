@@ -175,7 +175,7 @@ try{
 
   const level=fixture('offline-level-capability'),beforeLevel=dispatches.length;
   const state=await level.execute('unreal_state',{});
-  assert.deepEqual(state.value.executionSafety.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000});
+  assert.deepEqual(state.value.executionSafety.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000,guardMaxRepairAttempts:3,guardMaxRepeatedErrors:2});
   assert.equal(state.value.blueprintSupport.levelBlueprintLookup,false);
   checkedError(await level.execute('unreal_level_blueprint',{mapPath:'/Game/Maps/Map_Test'}),'LEVEL_BLUEPRINT_LOOKUP_UNAVAILABLE');
   checkedError(await level.execute('unreal_read_blueprint',{assetPath:'/Game/Maps/Map_Test.Map_Test:PersistentLevel.Map_Test'}),'LEVEL_BLUEPRINT_REQUIRES_LOOKUP');

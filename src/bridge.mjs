@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile, unlink, appendFile, rename, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, focusSchema, catalogSchema, knowledgeSchema, knowledgeRecordSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, dataTableCopySchema, runtimeChangedSchema, runtimeSnapshotSchema, runtimeSnapshotResultSchema, runtimeHistorySchema, fail, BridgeError } from './protocol.mjs';
@@ -23,9 +23,16 @@ const runtimeIdentity=({playSessionId,worldId,objectId})=>({playSessionId,worldI
 const SNAPSHOT_LIMIT=20, SNAPSHOT_BYTES=16*1024*1024;
 
 export class UnrealBridge extends EventEmitter {
-  constructor(config={}) {
+  constructor(config={}, {getConfig}={}) {
     super();
     this.config={port:17891, stateDir:defaultStateDir(), requestTimeoutMs:30000, heartbeatMs:10000, allowWrites:true, ...config};
+    this.config.stateDir=resolve(this.config.stateDir);
+    // Keep the original object API for standalone consumers; the plugin reads
+    // volatile settings in place without replacing the bridge or its leases.
+    if(getConfig)for(const key of ['allowWrites','requireApproval','requestTimeoutMs','knowledgeTimeoutMs']){
+      const fallback=this.config[key];
+      Object.defineProperty(this.config,key,{enumerable:true,get:()=>getConfig()[key]??fallback});
+    }
     this.editors=new Map(); this.sessions=new Map(); this.pending=new Map(); this.previews=new Map(); this.inflight=new Map(); this.results=new Map(); this.uncertain=new Map(); this.eventVersion=0; this.closed=false;
     this.runtimeSnapshots=new Map(); this.bindingVersions=new Map(); this.writeLocks=new Map();
     this.editorWrites=new EditorWrites();
@@ -69,6 +76,10 @@ export class UnrealBridge extends EventEmitter {
           ws.send(JSON.stringify({type:'hello_ack',protocol:VERSION,connectionId:randomUUID()})); this.changed(); return;
         }
         if(message.type==='response') {
+          // Visual evidence can still be written after the caller times out.
+          // A reply from the same authenticated connection proves that native
+          // generation ended, even when its request promise already settled.
+          if(typeof message.ok==='boolean'&&typeof message.id==='string')this.emit('request-settled',{editor,id:message.id});
           const pending=this.pending.get(message.id);
           if(!pending || pending.editor!==editor) return;
           this.pending.delete(message.id); clearTimeout(pending.timer); pending.cleanup();
@@ -87,7 +98,7 @@ export class UnrealBridge extends EventEmitter {
       clearTimeout(helloTimer); if(!editor||this.editors.get(editor.editorId)!==editor)return;
       this.editors.delete(editor.editorId); this.invalidate(editor.editorId);
       for(const records of this.runtimeSnapshots.values())for(const record of records)if(record.editor===editor&&record.status==='available'){record.status='disconnected';record.reason='editor_disconnected';}
-      for(const [key,p] of this.pending) if(p.editorId===editor.editorId){clearTimeout(p.timer);p.cleanup();this.pending.delete(key);p.reject(new BridgeError('DISCONNECTED','Editor disconnected; check request status before retrying a write'));}
+      for(const [key,p] of this.pending) if(p.editorId===editor.editorId){clearTimeout(p.timer);p.cleanup();this.pending.delete(key);p.reject(new BridgeError('DISCONNECTED','Editor disconnected; check request status before retrying a write',{requestId:key}));}
       this.changed();
     });
   }
@@ -194,8 +205,8 @@ export class UnrealBridge extends EventEmitter {
   }
   async focus(sessionId,args,signal){const editor=this.target(sessionId);if(!editor.capabilities.includes('focus_asset'))fail('FOCUS_UNAVAILABLE','This editor does not support asset presentation');if(!editor.capabilities.includes('safe_asset_presentation'))fail('FOCUS_SAFETY_UNAVAILABLE','Update and restart the UE bridge plugin before focusing assets: this editor does not verify presentation targets',{execution:'not_started',retryable:true});return this.request(editor,'focus_asset',focusSchema.parse(args),{signal});}
   async catalog(sessionId,args={}){return this.request(this.target(sessionId),'catalog',catalogSchema.parse(args));}
-  async knowledge(sessionId,args,signal){const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.request(editor,'knowledge_call',knowledgeSchema.parse(args),{signal,timeoutMs:120000});}
-  async knowledgeRecord(sessionId,args,signal){const {tool,arguments:toolArgs,requestId}=knowledgeRecordSchema.parse(args);const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.mutate(sessionId,'knowledge_call',{tool,arguments:toolArgs},requestId,signal);}
+  async knowledge(sessionId,args,signal){const timeoutMs=this.config.knowledgeTimeoutMs??120000;const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.request(editor,'knowledge_call',knowledgeSchema.parse(args),{signal,timeoutMs});}
+  async knowledgeRecord(sessionId,args,signal){const timeoutMs=this.config.knowledgeTimeoutMs??120000;const {tool,arguments:toolArgs,requestId}=knowledgeRecordSchema.parse(args);const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.mutate(sessionId,'knowledge_call',{tool,arguments:toolArgs},requestId,signal,{timeoutMs});}
   async mcpTools(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_list_tools',{}, {signal});}
   async mcpToolsets(sessionId,signal){return this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'list_toolsets',arguments:{}},{signal});}
   async mcpDescribe(sessionId,args,signal){
@@ -278,6 +289,7 @@ export class UnrealBridge extends EventEmitter {
     if(this.results.size>1000)this.results.delete(this.results.keys().next().value);
   }
   async mutate(sessionId,method,params,requestId,signal,options={}){
+    const timeoutMs=options.timeoutMs??this.config.requestTimeoutMs;
     // Read-only status is derived from the audited host catalog, never from
     // caller metadata. All other MCP operations remain potential mutations.
     const readOnly=method==='mcp_call_tool'&&options.mcpReadOnly===true&&isReadOnlyMcpCall(params);
@@ -299,7 +311,7 @@ export class UnrealBridge extends EventEmitter {
       if(signal?.aborted)fail('CANCELLED','Request cancelled before dispatch',{execution:'not_started',requestId});
       if(editor.ws.readyState!==WebSocket.OPEN)fail('DISCONNECTED','Editor disconnected before dispatch',{execution:'not_started',requestId});
       dispatched=true;
-      const result=await this.request(editor,method,params,{id:requestId,signal});
+      const result=await this.request(editor,method,params,{id:requestId,signal,timeoutMs});
       if(method==='mcp_call_tool'&&(result?.isError===true||result?.ok===false))throw mcpFailure(result,requestId,readOnly);
       if(method==='data_table_copy_property'&&result?.verified!==true)fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
       this.cacheResult(key,{hash,result});

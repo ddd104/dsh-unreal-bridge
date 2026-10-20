@@ -1,8 +1,10 @@
 import {BridgeError} from './protocol.mjs';
 import {randomUUID} from 'node:crypto';
 import {isUnsafeWriteError} from './write-safety.mjs';
+import {RepairTracker,operationEvidence} from './repair-tracker.mjs';
+import {DEFAULTS} from './settings-spec.mjs';
 
-export const EXECUTION_LIMIT_DEFAULTS=Object.freeze({guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000});
+export const EXECUTION_LIMIT_DEFAULTS=Object.freeze(Object.fromEntries(Object.entries(DEFAULTS).filter(([key])=>key.startsWith('guard'))));
 const RECOVERY_TOOLS=new Set(['unreal_state','unreal_request_status']);
 const RECOVERY_CALL_LIMIT=2;
 const nonnegative=value=>Number.isFinite(value)?Math.max(0,Math.min(Number.MAX_SAFE_INTEGER,Math.trunc(value))):0;
@@ -45,21 +47,40 @@ function prohibitedInput(exec){
 }
 
 /** Install a per-turn guard; before/after also support hosts without global tool hooks. */
-export function registerExecutionGuard(ctx,config={}){
-  const limits={...EXECUTION_LIMIT_DEFAULTS};
-  for(const key of Object.keys(EXECUTION_LIMIT_DEFAULTS)){
-    if(config[key]!==undefined)limits[key]=config[key];
-    if(!Number.isSafeInteger(limits[key])||limits[key]<1)throw new TypeError(`${key} must be a positive safe integer`);
+export function registerExecutionGuard(ctx,configOrGetter={},options={}){
+  function readLimits(){
+    const config=typeof configOrGetter==='function'?configOrGetter():configOrGetter;
+    const limits={...EXECUTION_LIMIT_DEFAULTS};
+    for(const key of Object.keys(EXECUTION_LIMIT_DEFAULTS)){
+      if(config?.[key]!==undefined)limits[key]=config[key];
+      const minimum=key==='guardMaxRepairAttempts'?0:1;
+      if(!Number.isSafeInteger(limits[key])||limits[key]<minimum)throw new TypeError(`${key} must be a ${minimum?'positive':'nonnegative'} safe integer`);
+    }
+    return Object.freeze(limits);
   }
-  const rounds=new Map(),removers=[],executions=new WeakMap();
+  readLimits();
+  const rounds=new Map(),removers=[],executions=new WeakMap(),operations=new WeakMap();
   let disposed=false;
-  const service=key=>{try{return ctx.get?.(key)??ctx[key];}catch{return ctx[key];}};
+  const service=key=>{
+    try{return typeof options.getService==='function'?options.getService(key):ctx.get?.(key)??ctx[key];}
+    catch{return undefined;}
+  };
   const sessionOf=exec=>exec?.agent?.session;
+  function notify(state){
+    if(disposed||!state||rounds.get(state.sessionId)!==state)return;
+    try{options.onChange?.(state.sessionId,status(state.sessionId));}catch(error){service('logger')?.warn?.(`Unreal execution status notification failed: ${error.message}`);}
+  }
   function clearTimer(state){if(state.timer){clearTimeout(state.timer);state.timer=undefined;}}
   function create(sessionId,turn,boundary,boundarySource){
     const old=rounds.get(sessionId);if(old)clearTimer(old);
-    const state={sessionId,turn:turn??null,boundary,boundarySource,active:false,halted:false,reason:null,calls:0,errors:0,lastError:null,errorNoticeCount:0,currentStep:0,activationStep:0,steps:0,roots:new Set(),failedRoots:new Set(),tokenRoots:new Map(),budgetExhausted:false,exhaustedBy:null,summaryOnly:false,recoveryTokens:new Set(),recoveryStep:null,summaryStep:null};
-    rounds.set(sessionId,state);return state;
+    const state={sessionId,turn:turn??null,boundary,boundarySource,active:false,ended:false,endedAt:null,limits:null,repairs:null,halted:false,reason:null,calls:0,errors:0,lastError:null,errorNoticeCount:0,currentStep:0,activationStep:0,steps:0,roots:new Set(),failedRoots:new Set(),tokenRoots:new Map(),budgetExhausted:false,exhaustedBy:null,summaryOnly:false,recoveryTokens:new Set(),recoveryStep:null,summaryStep:null};
+    rounds.delete(sessionId);rounds.set(sessionId,state);
+    // Preserve all live turns, while bounding retained completed/idle history.
+    for(const [key,prior] of rounds){
+      if(rounds.size<=128)break;
+      if(key!==sessionId&&(!prior.active||prior.ended||prior.halted)){clearTimer(prior);rounds.delete(key);}
+    }
+    notify(state);return state;
   }
   function stateFor(exec){
     const session=sessionOf(exec);if(!session?.id||disposed)return undefined;
@@ -68,21 +89,29 @@ export function registerExecutionGuard(ctx,config={}){
     if(boundary?.openTurnStartSeq!==null&&boundary?.openTurnStartSeq!==undefined){
       const key=`seq:${boundary.openTurnStartSeq}`;
       if(!state||state.boundary!==key)state=create(session.id,boundary.lastTurn,key,'projection');
+    }else if(state?.boundarySource==='projection'&&boundary?.openTurnStartSeq===null&&boundary.lastTurn===state.turn){
+      end(state);
     }
     // A host without either boundary API cannot prove that a fresh turn began.
     // Keep its fallback guard latched rather than reset on a model-controlled ID.
     state??=create(session.id,null,'fallback','unavailable');
     state.agent=exec.agent;return state;
   }
+  function end(state){
+    if(state.ended)return;
+    clearTimer(state);state.ended=true;state.endedAt=Date.now();state.active=false;notify(state);
+  }
   function halt(state,reason){
     if(state.halted||disposed)return;
-    state.halted=true;state.reason=reason;clearTimer(state);
+    state.halted=true;state.reason=reason;state.stoppedAt=Date.now();clearTimer(state);
+    notify(state);
     state.agent?.cancel?.({kind:'hook',reason},{keepInbox:true});
   }
   function haltedError(state){return new BridgeError('EXECUTION_HALTED',state.reason,{retryable:false,turn:state.turn,toolCalls:state.calls,errors:state.errors});}
   function exhaust(state,by,reason){
     if(state.halted||state.budgetExhausted)return;
     state.budgetExhausted=true;state.exhaustedBy=by;state.reason=reason;
+    notify(state);
   }
   function budgetError(state){return new BridgeError('EXECUTION_BUDGET_EXHAUSTED',`${state.reason} 请停止修改，根据已有证据总结已完成、未完成、验证与保存状态。`,{retryable:false,execution:'not_started',turn:state.turn,exhaustedBy:state.exhaustedBy,remaining:remaining(state),summaryOnly:state.summaryOnly});}
   // Pre-step messages are persisted by DSH as user/message events. Match its
@@ -100,11 +129,13 @@ export function registerExecutionGuard(ctx,config={}){
     throw budgetError(state);
   }
   function activate(state){
+    const limits=state.limits=readLimits();state.repairs=new RepairTracker(limits);
     state.active=true;state.activationStep=state.currentStep;state.steps=1;state.startedAt=Date.now();state.deadlineAt=state.startedAt+limits.guardTimeoutMs;
     state.timer=setTimeout(()=>{
       if(rounds.get(state.sessionId)===state)halt(state,`Unreal 任务已超过 ${limits.guardTimeoutMs/1000} 秒，已停止本轮执行，请检查已完成的修改后重新发起任务。`);
     },limits.guardTimeoutMs);
     state.timer.unref?.();
+    notify(state);
   }
   function rootOf(state,exec){
     const root=exec.rootCallId??(exec.parent?state.tokenRoots.get(exec.parent)??exec.parent:exec.callId??exec.token??exec);
@@ -115,17 +146,20 @@ export function registerExecutionGuard(ctx,config={}){
     const state=stateFor(exec);if(!state)return;
     // Retain the owning turn even when a precheck throws before root admission.
     // Its eventual post-execute callback must not be charged to a newer turn.
-    executions.set(exec,{state});
+    let record=executions.get(exec);
+    if(record?.state!==state){record={state};executions.set(exec,record);}
+    if(state.ended)return;
     if(state.halted)throw haltedError(state);
     if(!state.active&&/^unreal_/.test(exec.name??''))activate(state);
     if(!state.active)return;
+    const limits=state.limits;
     if(Date.now()>=state.deadlineAt)halt(state,`Unreal 任务已超过 ${limits.guardTimeoutMs/1000} 秒，已停止本轮执行。`);
     if(!state.halted&&prohibitedInput(exec))throw new BridgeError('MCP_POLICY_BLOCKED','Unreal 任务禁止通过终端调用真实鼠标或剪贴板接口；此调用未执行，请改用允许的编辑器结构化工具。',{execution:'not_started',retryable:false,reason:'desktop_input'});
     if(state.halted)throw haltedError(state);
     if(state.budgetExhausted){
-      recovery(exec,state);executions.set(exec,{state,root:rootOf(state,exec)});return;
+      recovery(exec,state);record.root=rootOf(state,exec);notify(state);return;
     }
-    const root=rootOf(state,exec);executions.set(exec,{state,root});
+    const root=rootOf(state,exec);record.root=root;
     if(!state.roots.has(root)){
       if(state.calls>=limits.guardMaxToolCalls){
         exhaust(state,'tool_calls',`Unreal 本轮已用完 ${limits.guardMaxToolCalls} 次工具调用预算，已保留收尾机会。`);
@@ -133,26 +167,50 @@ export function registerExecutionGuard(ctx,config={}){
       }
       state.roots.add(root);state.calls++;
     }
+    // Global hooks may run before the wrapper has resolved its editor/target.
+    // The wrapper's second before() admits the trusted operation exactly once.
+    const operation=operations.get(exec);
+    if(operation&&!record.repairAdmitted){
+      record.repairAdmitted=true;
+      try{record.repairTicket=state.repairs.admit(operation);}
+      catch(error){record.repairDenied=error;notify(state);throw error;}
+    }
+    if(record.repairDenied){
+      // A duplicate wrapper invocation cannot turn a previously denied precheck
+      // into an allowed execution by reusing the same host execution object.
+      throw record.repairDenied;
+    }
+    notify(state);
   }
   function after(exec,value){
     if(disposed)return value;
     const recorded=executions.get(exec);
     const state=recorded?.state??stateFor(exec);
-    if(!state?.active||rounds.get(state.sessionId)!==state||state.halted)return value;
+    if(!state?.active||state.ended||rounds.get(state.sessionId)!==state||state.halted)return value;
+    const limits=state.limits;
     const root=recorded?.root??rootOf(state,exec);
     const hostResult=value&&typeof value==='object'&&typeof value.isError==='boolean';
     const body=hostResult&&value.isError===false?value.value:value;
     const failed=value instanceof Error||value?.isError===true||body?.ok===false;
-    if(!failed)return value;
+    if(!failed){
+      state.repairs.complete(recorded?.repairTicket,null);
+      const operation=operations.get(exec);
+      if(operation?.statusRequestId)for(const candidate of rounds.values()){
+        if(candidate.repairs?.reconcile(operation,body))notify(candidate);
+      }
+      notify(state);return value;
+    }
     const error=body?.error??body;
     const code=error?.code??error?.info?.code;
     const details=error?.details??error?.info?.details??body?.details;
-    if(code==='EXECUTION_BUDGET_EXHAUSTED')return value;
+    if(['EXECUTION_BUDGET_EXHAUSTED','REPAIR_BUDGET_EXHAUSTED','REPAIR_TRACKING_LIMIT'].includes(code))return value;
+    state.repairs.complete(recorded?.repairTicket,{code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',details});
+    const problem=state.repairs.issueFor(recorded?.repairTicket);
     const unsafe=isUnsafeWriteError(body);
     if(!state.failedRoots.has(root)){
       state.failedRoots.add(root);state.errors++;
-      const recovery=unsafe?'stop_writes':['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN'].includes(code)?'check_request_status':details?.rollback==='not_available'?'verify_before_retry':code==='MCP_POLICY_BLOCKED'||details?.retryable===false&&details?.rollback!=='restored'?'choose_supported_operation':'correct_and_retry';
-      state.lastError={code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',rollback:unsafe?'failed':details?.rollback??null,recovery};
+      const recovery=unsafe?'stop_writes':['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN'].includes(code)?'check_request_status':problem?.status==='blocked'?'stop_problem':details?.rollback==='not_available'?'verify_before_retry':code==='MCP_POLICY_BLOCKED'||details?.retryable===false&&details?.rollback!=='restored'?'choose_supported_operation':'correct_and_retry';
+      state.lastError={code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',rollback:unsafe?'failed':details?.rollback??null,recovery,...(problem?{problem}:{})};
     }
     if(unsafe){
       // A late result from an admitted parallel call may reveal unsafe state
@@ -162,6 +220,7 @@ export function registerExecutionGuard(ctx,config={}){
       else exhaust(state,'unsafe_state',reason);
     }
     else if(state.errors>=limits.guardMaxErrors)exhaust(state,'errors',`Unreal 本轮已累计 ${state.errors} 次工具错误，已停止进一步修改并保留收尾机会。`);
+    notify(state);
     return value;
   }
   function on(name,callback){const remove=ctx.on?.(name,callback);if(typeof remove==='function')removers.push(remove);}
@@ -173,7 +232,7 @@ export function registerExecutionGuard(ctx,config={}){
         if(rounds.get(session.id)?.boundary!==key)create(session.id,event.data.turn,key,'event');
       }else if(event.type==='turn/end'){
         const state=rounds.get(session.id);
-        if(state&&state.turn===event.data.turn){clearTimer(state);state.ended=true;}
+        if(state&&state.turn===event.data.turn)end(state);
       }else if(event.type==='step/start'){
         const state=rounds.get(session.id);if(state&&state.turn===event.data.turn)state.currentStep=nonnegative(event.data.step);
       }
@@ -181,7 +240,7 @@ export function registerExecutionGuard(ctx,config={}){
     on('tools/pre-execute',async(exec,next)=>{
       try{before(exec);}catch(error){
         if(error.code==='EXECUTION_HALTED')return {kind:'cancel'};
-        if(error.code==='EXECUTION_BUDGET_EXHAUSTED'||error.code==='MCP_POLICY_BLOCKED')return {kind:'deny',reason:error.message,info:{code:error.code,details:error.details}};
+        if(['EXECUTION_BUDGET_EXHAUSTED','MCP_POLICY_BLOCKED','REPAIR_BUDGET_EXHAUSTED','REPAIR_TRACKING_LIMIT'].includes(error.code))return {kind:'deny',reason:error.message,info:{code:error.code,details:error.details}};
         throw error;
       }
       return next();
@@ -191,6 +250,7 @@ export function registerExecutionGuard(ctx,config={}){
       const assembled=await next();
       const state=stateFor({agent:context.agent??context.scope});
       if(!state?.active)return assembled;
+      const limits=state.limits;
       // Assembly precedes pre-step: predict the next closing stage before its
       // one permitted sample, so that the model is actually offered no tools.
       if(state.steps>=limits.guardMaxSteps){
@@ -207,7 +267,9 @@ export function registerExecutionGuard(ctx,config={}){
       if(state){
         state.currentStep=nonnegative(payload.step);
         if(state.active){
+          const limits=state.limits;
           state.steps=nonnegative(state.currentStep-state.activationStep+1);
+          notify(state);
           if(state.steps>limits.guardMaxSteps){
             exhaust(state,'model_steps',`Unreal 本轮已用完 ${limits.guardMaxSteps} 个模型步骤预算，已保留一次无工具总结。`);
             state.summaryOnly=true;
@@ -220,6 +282,7 @@ export function registerExecutionGuard(ctx,config={}){
             if(!canAddNotice(payload,decision)||rounds.get(state.sessionId)!==state)return decision;
             if(recoveryStage)state.recoveryStep=state.currentStep;
             else{state.summaryOnly=true;state.summaryStep=state.currentStep;}
+            notify(state);
             const instruction=state.summaryOnly?'不得再调用工具；只根据已有证据总结已完成、未完成、验证与保存状态。':'只在确有需要时使用剩余的最多两次 unreal_state / unreal_request_status 查询；不得再修改资产。然后总结已完成、未完成、验证与保存状态。';
             return {...decision,messages:[...decision.messages,notice(`${state.reason} ${instruction}`)]};
           }
@@ -230,7 +293,7 @@ export function registerExecutionGuard(ctx,config={}){
             const parts=[];
             if(state.errors>state.errorNoticeCount){
               const error=state.lastError;
-              const instruction=error.recovery==='verify_before_retry'?'该写操作未提供回滚保证，先读取目标当前状态，确认是否已部分生效，再根据错误修正操作；不要原样盲重试。':error.recovery==='check_request_status'?'先使用原 requestId 查询 unreal_request_status，确认结果；不要用新编号重复可能已经执行的写入。':error.recovery==='choose_supported_operation'?'此操作不受支持或已被策略拒绝；改用允许的操作继续独立工作，不得换脚本、桌面输入或调度器绕过限制。':'根据原始错误读取必要信息、修正参数或操作后继续验证；不要重复无变化的失败请求。';
+              const instruction=error.recovery==='stop_problem'?'该目标的当前操作已达到单问题修复限制；停止重试这一项，说明现状，可以继续读取诊断、查询原请求状态或处理其他目标与独立操作。':error.recovery==='verify_before_retry'?'该写操作未提供回滚保证，先读取目标当前状态，确认是否已部分生效，再根据错误修正操作；不要原样盲重试。':error.recovery==='check_request_status'?'先使用原 requestId 查询 unreal_request_status，确认结果；不要用新编号重复可能已经执行的写入。':error.recovery==='choose_supported_operation'?'此操作不受支持或已被策略拒绝；改用允许的操作继续独立工作，不得换脚本、桌面输入或调度器绕过限制。':'根据原始错误读取必要信息、修正参数或操作后继续验证；不要重复无变化的失败请求。';
               parts.push(`Unreal 工具失败（${error.code}）：${error.message.slice(0,1200)}。${instruction} 已累计 ${state.errors}/${limits.guardMaxErrors} 次错误，成功调用不会清零；确定失败并完成核实后的修正写入使用新的 requestId。`);
               state.errorNoticeCount=state.errors;
             }
@@ -243,14 +306,25 @@ export function registerExecutionGuard(ctx,config={}){
       return next();
     });
   }
-  function remaining(state){return {toolCalls:nonnegative(limits.guardMaxToolCalls-state.calls),steps:nonnegative(limits.guardMaxSteps-state.steps),errors:nonnegative(limits.guardMaxErrors-state.errors),timeMs:state.active?nonnegative(state.deadlineAt-Date.now()):limits.guardTimeoutMs,recoveryCalls:state.summaryOnly?0:nonnegative(RECOVERY_CALL_LIMIT-state.recoveryTokens.size)};}
+  function remaining(state){
+    const limits=state.limits??readLimits();
+    const now=state.stoppedAt??state.endedAt??Date.now();
+    return {toolCalls:nonnegative(limits.guardMaxToolCalls-state.calls),steps:nonnegative(limits.guardMaxSteps-state.steps),errors:nonnegative(limits.guardMaxErrors-state.errors),timeMs:state.startedAt===undefined?limits.guardTimeoutMs:nonnegative(state.deadlineAt-now),recoveryCalls:state.summaryOnly?0:nonnegative(RECOVERY_CALL_LIMIT-state.recoveryTokens.size)};
+  }
   function status(sessionId){
     const state=rounds.get(sessionId);if(!state)return null;
+    const limits=state.limits??readLimits();
     const {turn,boundarySource,active,halted,reason,calls,errors,steps,startedAt,deadlineAt}=state;
     const left=remaining(state);
     const near=active&&(calls/limits.guardMaxToolCalls>=0.8||steps/limits.guardMaxSteps>=0.8||errors/limits.guardMaxErrors>=0.8||left.timeMs/limits.guardTimeoutMs<=0.2);
-    const warning=state.budgetExhausted?`${reason} 请准备总结当前结果与未完成部分。`:near?'Unreal 本轮预算接近上限，请优先完成当前验证，并准备报告未完成部分。':null;
-    return {turn,boundarySource,active,halted,reason,calls,toolCalls:calls,errors,lastError:state.lastError,steps,startedAt:startedAt??null,deadlineAt:deadlineAt??null,limits:{...limits},crossToolEnforcement:typeof ctx.on==='function',phase:halted?'halted':state.budgetExhausted?'summary':warning?'warning':active?'active':'idle',budgetExhausted:state.budgetExhausted,exhaustedBy:state.exhaustedBy,summaryOnly:state.summaryOnly,recoveryCallsUsed:state.recoveryTokens.size,remaining:left,warning};
+    const warning=state.ended?null:state.budgetExhausted?`${reason} 请准备总结当前结果与未完成部分。`:near?'Unreal 本轮预算接近上限，请优先完成当前验证，并准备报告未完成部分。':null;
+    const elapsedMs=startedAt===undefined?0:nonnegative((state.stoppedAt??state.endedAt??Date.now())-startedAt);
+    const repairs=state.repairs?.status()??{issues:[],total:0,attemptsUsed:0,failures:0,activeCount:0,blockedCount:0,resolvedCount:0,hiddenCount:0,capacityReached:false};
+    return {turn,boundarySource,active,halted,reason,calls,toolCalls:calls,errors,lastError:state.lastError,steps,startedAt:startedAt??null,deadlineAt:deadlineAt??null,endedAt:state.endedAt,elapsedMs,limits:{...limits},repairs,crossToolEnforcement:typeof ctx.on==='function',phase:state.ended?'completed':halted?'halted':state.budgetExhausted?'summary':warning?'warning':active?'active':'idle',budgetExhausted:state.budgetExhausted,exhaustedBy:state.exhaustedBy,summaryOnly:state.summaryOnly,recoveryCallsUsed:state.recoveryTokens.size,remaining:left,warning};
+  }
+  function setOperation(exec,evidence){
+    if(!exec||typeof exec!=='object')throw new TypeError('Execution must be a host object');
+    if(!operations.has(exec))operations.set(exec,operationEvidence(evidence));
   }
   function dispose(){
     if(disposed)return;disposed=true;
@@ -258,5 +332,5 @@ export function registerExecutionGuard(ctx,config={}){
     for(const remove of removers.splice(0))remove();
     rounds.clear();
   }
-  return {before,after,dispose,status};
+  return {before,after,dispose,status,setOperation};
 }

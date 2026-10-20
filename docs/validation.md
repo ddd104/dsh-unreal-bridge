@@ -1,5 +1,14 @@
 # 本机验证记录
 
+## 2026-10-20 设置、执行状态、单问题限制与缓存管理（0.5.0）
+
+- `npm run check` 构建与 **268/268** 项测试通过。覆盖热配置、不重建连接与写保护、本轮快照/下一轮生效、前后置钩子去重、问题额度与连续错误、诊断读取、跨对话查回成功结果、结束后冻结计时，以及界面草稿/冲突/清理确认。
+- 使用已安装 DSH 0.2.1-rc.2 的真实 Loader、Settings、ConfigEditor 和 ToolRuntime，在隔离 profile 验证最终 `lib/index.js`：**8 组通过**。包括原子保存、冷启动恢复、旧 revision/非法值/静态字段拒绝、恢复继承默认和动态审批服务加入/移除。确认原 fiber、bridge、server、token 和未知写屏障保留。报告 `.test-state/settings-runtime-built-check.json`。
+- 最终构建通过已安装 ToolRuntime 的 MCP **7/7** 检查，以及真实 AgentLoop/Session/JSONL **8/8** 检查；报告 `.test-state/settings-mcp-runtime.json`、`.test-state/settings-session-runtime.json`。
+- 缓存测试仅操作临时目录，覆盖归档保留、容量目标、保留期承诺、证据生成/比较/附件使用保护、Windows 大小写及链接路径拒绝、并发清理与退出等待。真实本地 WebSocket 回归验证截图超时/取消后的迟到响应；同一连接确认完成前保留文件保护，未知断线持续保护并计入容量上限。
+- 使用 Chrome 无界面模式渲染实际 React 组件并检查布局，预览 `.test-state/settings-preview/settings.png`；使用模拟表单和缓存数据，不是已安装应用截图。包内容检查未包含测试目录。没有运行模型或改动 UE 资产。
+- 本次为宿主 JavaScript 更新，没有 UE 原生源码变化，无需为此重编译 UE。工作区构建已完成，未更新用户 desktop 安装或 EHV 工程；本轮也未清理用户现有缓存。
+
 ## 2026-10-20 回滚保护、编辑器写入协调与知识路由（0.4.5）
 
 - 架构调整限定在执行边界：宿主共用 `isUnsafeWriteError` 判定回滚失败，`EditorWrites` 管理每个编辑器的 `pending/uncertain` 写入占用；UE 原生异步入口另行拒绝重叠修改。冲突立即返回未执行的 `BUSY/EDITOR_BUSY`，不把可能过期的编辑请求排入后台队列。不同编辑器可独立执行，原生读取和四项精确审计的 DataTable MCP 查询可回读。

@@ -10,7 +10,7 @@ import {WebSocket} from 'ws';
 import sharp from 'sharp';
 import {UnrealBridge} from '../src/bridge.mjs';
 import {VisualService} from '../src/visual.mjs';
-import {visualCaptureSchema,visualCompareSchema} from '../src/protocol.mjs';
+import {visualCaptureSchema,visualCompareSchema,BridgeError} from '../src/protocol.mjs';
 import {apply} from '../src/index.mjs';
 
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
@@ -21,8 +21,9 @@ const template={kind:'component',source:'blueprint_editor',path:'/Game/BP_Car.BP
 async function fixture(t){
   const stateDir=await mkdtemp(join(tmpdir(),'dsh-visual-service-'));
   const bridge=await new UnrealBridge({port:0,stateDir,heartbeatMs:1000}).start();
-  t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
-  return {bridge,visual:new VisualService(bridge),stateDir};
+  const visual=new VisualService(bridge);
+  t.after(async()=>{await bridge.close();await visual.dispose();await rm(stateDir,{recursive:true,force:true});});
+  return {bridge,visual,stateDir};
 }
 
 async function writeCapture(message){
@@ -109,6 +110,105 @@ test('capture IDs are isolated by conversation and current editor binding',async
   bridge.bind('one','B');assert.throws(()=>visual.getCapture('one',capture.captureId),{code:'INSTANCE_CHANGED'});
   await assert.rejects(visual.compare('one',{referencePath,captureId:capture.captureId}),{code:'INSTANCE_CHANGED'});
   bridge.bind('one','A');assert.equal(visual.getCapture('one',capture.captureId),capture);
+});
+
+test('capture timeout uses the latest readonly configuration while an announced retention deadline stays fixed',async t=>{
+  const {bridge,visual}=await fixture(t);await editor(bridge);bridge.bind('chat','UE1');
+  let config=Object.freeze({visualTimeoutMs:60000,visualCacheRetentionDays:30}),time=Date.now();
+  visual.getConfig=()=>config;visual.cache.getConfig=()=>config;visual.cache.now=()=>time;
+  const request=bridge.request.bind(bridge),timeouts=[];
+  bridge.request=(target,method,args,options)=>{if(method==='visual_capture')timeouts.push(options.timeoutMs);return request(target,method,args,options);};
+  const first=await visual.capture('chat',{fullViewport:true}),firstDeadline=first.expiresAt;
+  config=Object.freeze({visualTimeoutMs:90000,visualCacheRetentionDays:1});time+=2*86400000;
+  const second=await visual.capture('chat',{fullViewport:true});
+  assert.deepEqual(timeouts,[60000,90000]);
+  assert.equal(first.expiresAt,firstDeadline);
+  assert.equal(Date.parse(second.expiresAt),time+86400000);
+  assert.equal((await visual.cache.cleanup()).deleted.visualEntries,0,'A shorter new policy must respect already published capture deadlines');
+  assert.equal(visual.getCapture('chat',first.captureId),first);
+  time+=2*86400000;
+  assert.throws(()=>visual.getCapture('chat',second.captureId),{code:'CAPTURE_EXPIRED'});
+  assert.equal(visual.getCapture('chat',first.captureId),first);
+});
+
+test('explicit idle cleanup expires captured IDs and cannot remove an in-flight capture',async t=>{
+  const {bridge,visual}=await fixture(t),entered=Promise.withResolvers(),release=Promise.withResolvers();
+  await editor(bridge,'UE1',{handler:async message=>{entered.resolve();await release.promise;return writeCapture(message);}});bridge.bind('chat','UE1');
+  const pending=visual.capture('chat',{fullViewport:true});await entered.promise;
+  try{
+    const result=await visual.cache.cleanup({mode:'all_idle'});
+    assert.equal(result.deleted.visualEntries,0);assert.equal(result.skipped.busy,1);
+  }finally{release.resolve();}
+  const capture=await pending;
+  assert.equal((await visual.cache.cleanup({mode:'all_idle'})).deleted.visualEntries,1);
+  assert.equal(visual.captures.size,0);
+  assert.throws(()=>visual.getCapture('chat',capture.captureId),{code:'CAPTURE_EXPIRED'});
+  assert.throws(()=>visual.getCapture('other-chat',capture.captureId),{code:'CAPTURE_NOT_FOUND'});
+});
+
+test('timed-out and cancelled captures keep evidence pinned until the same editor connection replies',async t=>{
+  for(const code of ['TIMEOUT','CANCELLED']){
+    const {bridge,visual}=await fixture(t),entered=Promise.withResolvers(),release=Promise.withResolvers();
+    await editor(bridge,'UE1',{handler:async message=>{entered.resolve(message);await release.promise;return writeCapture(message);}});
+    bridge.bind('chat','UE1');
+    const target=bridge.target('chat'),controller=new AbortController(),request=bridge.request.bind(bridge);
+    if(code==='TIMEOUT')bridge.request=(target,method,args,options)=>request(target,method,args,{...options,timeoutMs:30});
+    const pending=visual.capture('chat',{fullViewport:true},controller.signal);
+    const rejected=assert.rejects(pending,{code});
+    const message=await entered.promise;
+    if(code==='CANCELLED')controller.abort();
+    await rejected;
+    assert.equal(visual.quarantine.size,1);assert.equal(visual.captureRequests.size,0);
+    assert.equal((await visual.cache.cleanup({mode:'all_idle'})).skipped.busy,1);
+    bridge.emit('request-settled',{editor:{...target},id:message.id});
+    bridge.emit('request-settled',{editor:target,id:randomUUID()});
+    assert.equal(visual.quarantine.size,1,'Only the exact dispatched connection and request can release the evidence');
+    const settled=once(bridge,'request-settled');release.resolve();await settled;
+    assert.equal(visual.quarantine.size,0);
+    assert.equal((await visual.cache.cleanup({mode:'all_idle'})).deleted.visualEntries,1);
+  }
+});
+
+test('unknown disconnected capture remains protected and bounded until disposal; pre-dispatch refusal does not reserve evidence',async t=>{
+  const {bridge,visual}=await fixture(t);await editor(bridge);bridge.bind('chat','UE1');
+  let requestId;
+  bridge.request=async(_editor,_method,_args,options)=>{requestId=options.id;throw new BridgeError('DISCONNECTED','Disconnected after dispatch',{requestId});};
+  await assert.rejects(visual.capture('chat',{fullViewport:true}),{code:'DISCONNECTED'});
+  assert.equal(visual.quarantine.size,1);
+  assert.equal((await visual.cache.cleanup({mode:'all_idle'})).skipped.busy,1);
+  for(let index=0;index<511;index++)visual.pendingCaptures.add(`queued-${index}`);
+  await assert.rejects(visual.capture('chat',{fullViewport:true}),{code:'CAPTURE_LIMIT'});
+  visual.pendingCaptures.clear();
+  bridge.request=async()=>{throw new BridgeError('CANCELLED','Cancelled before dispatch');};
+  await assert.rejects(visual.capture('chat',{fullViewport:true}),{code:'CANCELLED'});
+  assert.equal(visual.quarantine.size,1);
+  assert.equal((await visual.cache.cleanup({mode:'all_idle'})).deleted.visualEntries,1);
+  visual.ownsCache=false;
+  assert.equal(bridge.listenerCount('request-settled'),1);
+  await visual.dispose();
+  assert.equal(visual.quarantine.size,0);assert.equal(bridge.listenerCount('request-settled'),0);
+  assert.equal((await visual.cache.cleanup({mode:'all_idle'})).deleted.visualEntries,1);
+});
+
+test('comparison pins its reference and capture throughout reading and pins generated evidence during attachment reads',async t=>{
+  const {bridge,visual}=await fixture(t);await editor(bridge);bridge.bind('chat','UE1');
+  const capture=await visual.capture('chat',{fullViewport:true});
+  const entered=Promise.withResolvers(),release=Promise.withResolvers(),read=visual.readReference;
+  visual.readReference=async(...args)=>{entered.resolve();await release.promise;return read(...args);};
+  const pending=visual.compare('chat',{referencePath:capture.cropPath,captureId:capture.captureId});await entered.promise;
+  try{
+    const result=await visual.cache.cleanup({mode:'all_idle'});
+    assert.equal(result.deleted.visualEntries,0);assert.equal(result.skipped.busy,2);
+  }finally{release.resolve();}
+  const report=await pending;
+  await visual.withEvidence(report,async()=>{
+    const cleaned=await visual.cache.cleanup({mode:'all_idle'});
+    assert.equal(cleaned.skipped.busy,1);assert.equal(cleaned.deleted.visualEntries,1);
+    assert.ok((await readFile(report.evidence.comparison)).length>0);
+    assert.ok((await readFile(report.reportPath)).length>0);
+  });
+  assert.equal((await visual.cache.cleanup({mode:'all_idle'})).deleted.visualEntries,1);
+  assert.throws(()=>visual.getCapture('chat',capture.captureId),{code:'CAPTURE_EXPIRED'});
 });
 
 test('assessment and unconfirmed regression remain unknown; confirmed aligned regression passes and preserves source evidence',async t=>{

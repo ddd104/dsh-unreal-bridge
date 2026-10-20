@@ -1,6 +1,9 @@
 import React,{useEffect,useState} from 'react';
 import {TYPERT_REMOTE} from './remote.mjs';
 import {registerVisualToolviews} from './visual-client.mjs';
+import {registerSettingsClient} from './settings-client.mjs';
+import {ExecutionStatus} from './execution-client.mjs';
+import {CachePanel} from './cache-client.mjs';
 
 const h=React.createElement;
 const colors={
@@ -34,14 +37,16 @@ export function UnrealDock({read,bind}) {
   useEffect(()=>{
     let active=true;
     let timer;
+    let interval=700;
     setState(null);
     setExpanded(false);
     const refresh=async()=>{
       try{
         const next=await read();
+        interval=next.executionSafety?.active||next.editorWrite?700:2000;
         if(active){setState(previous=>previous&&previous.version>next.version?previous:next);setError('');}
       }catch(e){if(active)setError(e.message??String(e));}
-      finally{if(active)timer=setTimeout(refresh,700);}
+      finally{if(active)timer=setTimeout(refresh,interval);}
     };
     refresh();
     return()=>{active=false;clearTimeout(timer);};
@@ -114,7 +119,8 @@ export function UnrealDock({read,bind}) {
             h('time',{dateTime:snapshot.capturedAt},captureTime(snapshot.capturedAt)),` · 帧 ${snapshot.sampledFrame}`,
             snapshot.target?` · ${runtimeIdentity(snapshot.target)}`:null),
           h('div',{style:{marginTop:2,color:colors.muted,fontSize:11,lineHeight:1.4}},[snapshot.project,snapshot.path].filter(Boolean).join(' · ')))))):null,
-    state?.uncertain?h('div',{role:'status',style:{color:colors.warning,marginTop:7,overflowWrap:'anywhere'}},`上次操作结果待确认：${state.uncertain.requestId}`):null,
+    state&&(state.executionSafety||state.editorWrite||state.writeLock)?h(ExecutionStatus,{state}):null,
+    state?.uncertain&&!state.editorWrite?h('div',{role:'status',style:{color:colors.warning,marginTop:7,overflowWrap:'anywhere'}},`上次操作结果待确认：${state.uncertain.requestId}`):null,
     error?h('div',{role:'alert',style:{color:colors.error,marginTop:7,overflowWrap:'anywhere'}},error):null);
 }
 
@@ -122,6 +128,11 @@ export async function apply(ctx) {
   await ctx.remote.$mount(TYPERT_REMOTE);
   registerVisualToolviews(ctx);
   ctx.inject(['remote.unrealBridge'],child=>{
+    const unwrap=async promise=>{const result=await promise;if(!result.ok)throw new Error(result.error.message);return result.value;};
+    const readCache=()=>unwrap(child.remote.unrealBridge.cacheStatus());
+    const cleanupCache=options=>unwrap(child.remote.unrealBridge.cacheCleanup(options));
+    const SettingsCache=()=>h(CachePanel,{read:readCache,cleanup:cleanupCache});
+    registerSettingsClient(child,{renderCache:SettingsCache});
     const using=(sessionId,call)=>child.sessions.using(sessionId,{source:'unrealBridge'},async reference=>{const state=reference.binding.session.getSnapshot();if(state.openState!=='open')throw state.openError??new Error('对话尚未就绪');const result=await call();if(!result.ok)throw new Error(result.error.message);return result.value;});
     child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>({read:()=>using(sessionId,()=>child.remote.unrealBridge.state(sessionId)),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId))})},UnrealDock));
   });
