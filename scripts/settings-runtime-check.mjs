@@ -1,30 +1,34 @@
 // Run with installed DSH Electron in Node mode:
 // ELECTRON_RUN_AS_NODE=1 "DeepSeek Harness.exe" scripts/settings-runtime-check.mjs
 // Uses the official Loader, Settings and ConfigEditor with a temporary profile.
+// --profile selects a read-only package resolver; all saved settings stay temporary.
 // No installed profile, UE editor, model API or user asset is modified.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {createRequire} from 'node:module';
+import {homedir} from 'node:os';
 import {dirname, join, resolve, relative, isAbsolute} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {randomUUID} from 'node:crypto';
 
 const args={};
 for(let index=2;index<process.argv.length;index+=2){
-  if(!['--runtime','--plugin','--output'].includes(process.argv[index])||!process.argv[index+1])throw new Error('Expected --runtime, --plugin or --output and a path');
+  if(!['--runtime','--profile','--plugin','--output'].includes(process.argv[index])||!process.argv[index+1])throw new Error('Expected --runtime, --profile, --plugin or --output and a path');
   args[process.argv[index]]=resolve(process.argv[index+1]);
 }
 const runtime=args['--runtime']??join(dirname(process.execPath),'resources/app.asar/dsh');
 const runtimeRequire=createRequire(join(runtime,'package.json'));
-const {boot,initProfile,readProfilePatches}=runtimeRequire('@deepseek-ai/dsh-app-boot');
+const {boot,initProfile,readProfilePatches,createRuntimeResolution,PluginPackages}=runtimeRequire('@deepseek-ai/dsh-app-boot');
 const load=name=>{const value=runtimeRequire(name);return value.default??value;};
 const ConfigEditor=load('@deepseek-ai/dsh-config-editor');
 const Settings=load('@deepseek-ai/dsh-settings');
 const {ToolRuntime}=runtimeRequire('@deepseek-ai/dsh-tools');
 const {scopeTarget}=runtimeRequire('@deepseek-ai/dsh-scope');
-const {Service}=runtimeRequire('@deepseek-ai/cordis');
+const {Context,Service}=runtimeRequire('@deepseek-ai/cordis');
 const pluginPath=args['--plugin']??resolve('src/index.mjs');
-const Plugin=await import(pathToFileURL(pluginPath).href);
+const resolverHome=process.env.DSH_HOME??join(homedir(),'.dsh');
+const resolverProfile=args['--profile']??join(resolverHome,'profiles','desktop');
+const loaderContext=new Context();
 const output=args['--output']??resolve('.test-state/settings-runtime-check.json');
 const testRoot=resolve('.test-state');
 fs.mkdirSync(testRoot,{recursive:true});
@@ -36,6 +40,11 @@ let context,tools;
 let sequence=0;
 
 try{
+  // Installed plugin peers are supplied by DSH. Use its normal resolver rather
+  // than accidentally depending on the checkout's development node_modules.
+  const resolution=await createRuntimeResolution({installAnchor:join(runtime,'package.json'),home:resolverHome,profile:{dir:resolverProfile,layers:[],skippedBundles:[]}});
+  new PluginPackages(loaderContext,{resolution});
+  const Plugin=await import(pathToFileURL(pluginPath).href);
   initProfile(dir,['test-settings-bundle']);
   const bundle=join(dir,'node_modules/test-settings-bundle');
   fs.mkdirSync(bundle,{recursive:true});
@@ -218,7 +227,7 @@ try{
   const report={status:'passed',plugin:pluginPath,versions:Object.fromEntries(
     ['@deepseek-ai/dsh-settings','@deepseek-ai/dsh-config-editor','@deepseek-ai/dsh-tools','@deepseek-ai/schemastery','@deepseek-ai/cordis'].map(name=>[
       name,JSON.parse(fs.readFileSync(join(runtime,'node_modules',name,'package.json'),'utf8')).version,
-    ])),checks,scope:'Temporary profile; real installed Loader, Settings, ConfigEditor, ToolRuntime and Cordis dependency lifecycle; synthetic write barrier and editor dispatch; no editor, model API, installed profile or user assets.'};
+    ])),checks,scope:'Temporary profile; read-only installed package resolver; real installed Loader, Settings, ConfigEditor, ToolRuntime and Cordis dependency lifecycle; synthetic write barrier and editor dispatch; no editor, model API, installed profile writes or user assets.'};
   fs.mkdirSync(dirname(output),{recursive:true});fs.writeFileSync(output,JSON.stringify(report,null,2)+'\n');
   console.log(JSON.stringify({status:'passed',checks:checks.length,output}));
 }catch(error){
@@ -226,8 +235,10 @@ try{
   throw error;
 }finally{
   try{await context?.fiber.dispose();}finally{
-    const rel=relative(testRoot,home);
-    assert.ok(rel&&!rel.startsWith('..')&&!isAbsolute(rel),'cleanup remains within isolated test root');
-    await fs.promises.rm(home,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+    try{await loaderContext.fiber.dispose();}finally{
+      const rel=relative(testRoot,home);
+      assert.ok(rel&&!rel.startsWith('..')&&!isAbsolute(rel),'cleanup remains within isolated test root');
+      await fs.promises.rm(home,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+    }
   }
 }

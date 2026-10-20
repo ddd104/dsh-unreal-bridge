@@ -1,13 +1,24 @@
 # 本机验证记录
 
+## 2026-10-20 全局设置入口补齐（0.5.1）
+
+- 纠正 0.5.0 只提供插件详情页配置、未接入全局设置的问题，新增 **设置 → Unreal Bridge**。两个入口复用同一个官方 `configForms` 控制器及配置 revision；支持加载错误重试、只读、草稿保留和并发修改保护。
+- 设置入口注册独立于 `remote.unrealBridge`，UE 未连接或缓存服务尚未就绪时仍可访问设置。显式声明官方设置 UI 依赖；缓存服务上线/离线时单独更新缓存面板。
+- `npm run check` 构建与 **272/272** 项测试通过，包含全局入口注册、官方表单订阅/保存适配、读取失败恢复和 Remote 未就绪时的入口可用性。
+- 已通过官方 CLI 安装到 DSH `desktop`；安装代码文件与本次构建逐项哈希一致，profile patch 保持原样，本地 `dsh-emotion` 的 4 个文件恢复后哈希一致。备份编号 `20261020-124207-765`，记录 `.test-state/settings-entry-installed.json`。已安装插件的官方设置/生命周期检查 **8/8** 通过，报告 `.test-state/settings-entry-installed-runtime.json`。
+- 使用实际 DSH 窗口刷新并验证 **左下角账号 → 设置 → Unreal Bridge**：全局入口、执行权限、单问题修复次数（3）、相同错误上限（2）、预算、超时、缓存保留及缓存统计均正常显示。UE 未连接时读取配置成功，缓存显示 7.0 MiB / 4 组。仅浏览，未修改用户设置、触发清理或运行模型；未退出 DSH。本次不涉及 UE 原生插件更新。
+
 ## 2026-10-20 设置、执行状态、单问题限制与缓存管理（0.5.0）
 
+- 后续按用户要求同步到实际安装：DSH `desktop` 升级至 **0.5.0**，EHV 的 UE 插件升级至 **0.4.5**。UE 使用已验证 HostProject 的 DLL/PDB，源码和引擎 BuildId 完全匹配，不使用工作区遗留旧 DLL；245 个源码/工具/运行时文件及 7 个二进制文件校验一致。安装报告 `.test-state/plugin-sync-installed.json`。
+- 安装后再次对实际 `desktop/node_modules/dsh-unreal-bridge/lib/index.js` 执行官方设置/生命周期 **8/8**、MCP **7/7**、真实会话 **8/8** 检查，全通过；已安装 sharp 0.35.5 成功生成 PNG。报告 `.test-state/plugin-sync-{settings,mcp,session}-runtime.json`、`.test-state/plugin-sync-native-dependencies.json`。设置验证脚本补齐宿主官方依赖解析，避免裸 Electron 缺少宿主 peer 时误报安装失败。
+- 安装备份编号 `20261020-122711-914`：DSH 位于 profile 的 `.plugin-manager/dsh-unreal-bridge-backups/`，UE 位于 EHV `Saved/DSHUnrealBridgeBackups/`。原 profile patch、工程文件、知识配置、3836 个缓存文件、2 个工程技能文件保持原样。安装器移入 `.ignored` 的本地 `dsh-emotion` 已完整备份并恢复原位，4 个文件哈希一致。未关闭正在运行的 DSH；完整退出并重新打开后加载新版。UE 当时未运行，下次打开工程即可加载。
 - `npm run check` 构建与 **268/268** 项测试通过。覆盖热配置、不重建连接与写保护、本轮快照/下一轮生效、前后置钩子去重、问题额度与连续错误、诊断读取、跨对话查回成功结果、结束后冻结计时，以及界面草稿/冲突/清理确认。
 - 使用已安装 DSH 0.2.1-rc.2 的真实 Loader、Settings、ConfigEditor 和 ToolRuntime，在隔离 profile 验证最终 `lib/index.js`：**8 组通过**。包括原子保存、冷启动恢复、旧 revision/非法值/静态字段拒绝、恢复继承默认和动态审批服务加入/移除。确认原 fiber、bridge、server、token 和未知写屏障保留。报告 `.test-state/settings-runtime-built-check.json`。
 - 最终构建通过已安装 ToolRuntime 的 MCP **7/7** 检查，以及真实 AgentLoop/Session/JSONL **8/8** 检查；报告 `.test-state/settings-mcp-runtime.json`、`.test-state/settings-session-runtime.json`。
 - 缓存测试仅操作临时目录，覆盖归档保留、容量目标、保留期承诺、证据生成/比较/附件使用保护、Windows 大小写及链接路径拒绝、并发清理与退出等待。真实本地 WebSocket 回归验证截图超时/取消后的迟到响应；同一连接确认完成前保留文件保护，未知断线持续保护并计入容量上限。
 - 使用 Chrome 无界面模式渲染实际 React 组件并检查布局，预览 `.test-state/settings-preview/settings.png`；使用模拟表单和缓存数据，不是已安装应用截图。包内容检查未包含测试目录。没有运行模型或改动 UE 资产。
-- 本次为宿主 JavaScript 更新，没有 UE 原生源码变化，无需为此重编译 UE。工作区构建已完成，未更新用户 desktop 安装或 EHV 工程；本轮也未清理用户现有缓存。
+- 0.5.0 功能实现为宿主 JavaScript 更新，没有新增 UE 原生源码变化，无需为此重编译 UE。首轮只完成工作区构建，随后按用户要求安装，并同步此前尚未安装的 UE 0.4.5 修复；没有清理用户现有缓存。
 
 ## 2026-10-20 回滚保护、编辑器写入协调与知识路由（0.4.5）
 

@@ -5,10 +5,20 @@ import Renderer,{act} from 'react-test-renderer';
 import {UnrealDock,apply} from '../src/client.mjs';
 test('client mounts the callable Remote namespace before registering the dock',async()=>{
   let definition;const calls=[];
-  const ctx={remote:{$mount:async contribution=>{assert.equal(contribution.package,'dsh-unreal-bridge');await Promise.resolve();ctx.remote.unrealBridge={state:async s=>({ok:true,value:{sessionId:s}}),bind:async(s,id)=>{calls.push([s,id]);return{ok:true,value:{sessionId:s}};}};}},sessions:{using:async(s,_options,fn)=>fn({binding:{session:{getSnapshot:()=>({openState:'open'})}}})},slots:{inject:(_name,fn)=>fn(),register:d=>{assert.ok(ctx.remote.unrealBridge);definition=d;}}};
-  ctx.inject=(keys,fn)=>{assert.deepEqual(keys,['remote.unrealBridge']);assert.ok(ctx.remote.unrealBridge);fn(ctx);};
+  const ctx={remote:{$mount:async contribution=>{assert.equal(contribution.package,'dsh-unreal-bridge');await Promise.resolve();ctx.remote.unrealBridge={state:async s=>({ok:true,value:{sessionId:s}}),bind:async(s,id)=>{calls.push([s,id]);return{ok:true,value:{sessionId:s}};}};}},sessions:{using:async(s,_options,fn)=>fn({binding:{session:{getSnapshot:()=>({openState:'open'})}}})},slots:{inject:(_name,fn)=>fn(),register:d=>{if(d.name==='conversation.input.dock'){assert.ok(ctx.remote.unrealBridge);definition=d;}}}};
+  ctx.inject=(keys,fn)=>{if(keys[0]==='configForms')return;assert.deepEqual(keys,['remote.unrealBridge']);assert.ok(ctx.remote.unrealBridge);fn(ctx);};
   await apply(ctx);const ui=definition.inject('conversation-a');assert.deepEqual(await ui.read(),{sessionId:'conversation-a'});await ui.bind('editor-b');assert.deepEqual(calls,[['conversation-a','editor-b']]);
   ctx.remote.unrealBridge.state=async()=>({ok:false,error:{code:'DISCONNECTED',message:'The editor disconnected'}});await assert.rejects(ui.read(),/editor disconnected/);
+});
+
+test('settings register while the bridge namespace is unavailable, independently of conversation controls',async()=>{
+  const slots=[],injections=[];
+  const ctx={remote:{$mount:async()=>{}},slots:{inject:(_name,fn)=>fn(),register:entry=>slots.push(entry)},inject:(keys)=>injections.push(keys)};
+  await apply(ctx);
+  assert.ok(slots.some(entry=>entry.name==='plugins.row.config'));
+  assert.ok(injections.some(keys=>keys[0]==='configForms'));
+  assert.ok(injections.some(keys=>keys[0]==='remote.unrealBridge'));
+  assert.ok(!slots.some(entry=>entry.name==='conversation.input.dock'));
 });
 test('conversation dock keeps assets collapsed, reveals a scrollable list, and binds through its session callback',async()=>{
   let tree;const choices=[];const state={version:1,editorId:'ue1',connected:true,editors:[{editorId:'ue1',project:'EHV',engineVersion:'5.8',pid:9}],selection:[{path:'/Game/BP_Demo.BP_Demo'}]};

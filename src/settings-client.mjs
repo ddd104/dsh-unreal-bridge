@@ -1,5 +1,5 @@
-import React, {useEffect, useRef, useState} from 'react';
-import {DEFAULTS, FIELD_SPECS, SETTING_GROUPS, SETTINGS_SLOT_KEY, fieldValueError} from './settings-spec.mjs';
+import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
+import {FIELD_SPECS, SETTING_GROUPS, SETTINGS_NAMESPACE, SETTINGS_SLOT_KEY, fieldValueError} from './settings-spec.mjs';
 
 const h = React.createElement;
 const color = {
@@ -103,10 +103,58 @@ export function SettingsPage({view='page', form, renderCache:Cache}) {
   );
 }
 
+function useSnapshot(source) {
+  const store = useMemo(() => ({
+    subscribe:listener=>source.subscribe(listener),
+    getSnapshot:()=>source.getSnapshot(),
+  }), [source]);
+  return useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+}
+
+/** Global Settings does not supply the plugin manager's owner `form` prop. */
+export function SettingsSection({configForm, describe, renderCache}) {
+  const state = useSnapshot(configForm);
+  const mirror = useSnapshot(describe);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState('');
+  const mounted = useRef(true);
+  useEffect(() => {mounted.current=true; return () => {mounted.current=false;};}, []);
+  const mutate = useMemo(() => (ops, revision) => configForm.mutate(ops, revision), [configForm]);
+  const error = retryError || mirror.error;
+  const retry = async() => {
+    setRetrying(true); setRetryError('');
+    try {await describe.load();}
+    catch (failure) {if(mounted.current)setRetryError(failure.message ?? String(failure));}
+    finally {if(mounted.current)setRetrying(false);}
+  };
+  return h('section', {'aria-label':'Unreal Bridge', style:{color:color.text, maxWidth:760}},
+    h('h2', {style:{margin:'0 0 8px', fontSize:18}}, 'Unreal Bridge'),
+    h('p', {style:{color:color.muted}}, '设置 UE 执行权限、修复次数、任务预算和缓存保留。'),
+    error ? h('div', null,
+      h('p', {role:'alert', style:{color:color.error}}, `读取设置失败：${error}`),
+      h('button', {type:'button', disabled:retrying, onClick:retry, style:buttonStyle}, retrying?'正在重试…':'重新读取'),
+    ) : null,
+    !error || state.status !== 'loading'
+      ? h(SettingsPage, {form:{state,mutate}, renderCache})
+      : null,
+  );
+}
+
+/** Both entries use the same official form; editor RPC availability is unrelated. */
 export function registerSettingsClient(ctx, options={}) {
-  return ctx.slots.inject('plugins.row.config', () =>
+  const row = ctx.slots.inject('plugins.row.config', () =>
     ctx.slots.register({
       name:'plugins.row.config', key:SETTINGS_SLOT_KEY,
       inject:()=>({renderCache:options.renderCache}),
     }, SettingsPage));
+  const section = ctx.inject(['configForms'], child => {
+    const configForm = child.configForms.get(SETTINGS_NAMESPACE);
+    const describe = child.configForms.describe();
+    child.slots.inject('settings.section', () => child.slots.register({
+      name:'settings.section', id:SETTINGS_NAMESPACE, order:60,
+      label:()=>'Unreal Bridge',
+      inject:()=>({configForm,describe,renderCache:options.renderCache}),
+    }, SettingsSection));
+  });
+  return async() => {row?.(); await section?.dispose();};
 }

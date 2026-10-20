@@ -1,4 +1,4 @@
-import React,{useEffect,useState} from 'react';
+import React,{useEffect,useState,useSyncExternalStore} from 'react';
 import {TYPERT_REMOTE} from './remote.mjs';
 import {registerVisualToolviews} from './visual-client.mjs';
 import {registerSettingsClient} from './settings-client.mjs';
@@ -125,14 +125,27 @@ export function UnrealDock({read,bind}) {
 }
 
 export async function apply(ctx) {
+  let cacheAccess=null;
+  const cacheListeners=new Set();
+  const subscribeCache=listener=>{cacheListeners.add(listener);return()=>cacheListeners.delete(listener);};
+  const cacheSnapshot=()=>cacheAccess;
+  const publishCache=value=>{cacheAccess=value;for(const listener of cacheListeners)listener();};
+  const SettingsCache=()=>{
+    const access=useSyncExternalStore(subscribeCache,cacheSnapshot,cacheSnapshot);
+    return access?h(CachePanel,access):h('p',{role:'status',style:{color:colors.muted}},'缓存服务连接后可查看占用和执行清理。');
+  };
+  // Settings belong to the global shell and must remain discoverable without
+  // an editor connection or the optional bridge Remote namespace.
+  registerSettingsClient(ctx,{renderCache:SettingsCache});
   await ctx.remote.$mount(TYPERT_REMOTE);
   registerVisualToolviews(ctx);
   ctx.inject(['remote.unrealBridge'],child=>{
     const unwrap=async promise=>{const result=await promise;if(!result.ok)throw new Error(result.error.message);return result.value;};
     const readCache=()=>unwrap(child.remote.unrealBridge.cacheStatus());
     const cleanupCache=options=>unwrap(child.remote.unrealBridge.cacheCleanup(options));
-    const SettingsCache=()=>h(CachePanel,{read:readCache,cleanup:cleanupCache});
-    registerSettingsClient(child,{renderCache:SettingsCache});
+    const access={read:readCache,cleanup:cleanupCache};
+    publishCache(access);
+    child.effect?.(()=>()=>{if(cacheAccess===access)publishCache(null);});
     const using=(sessionId,call)=>child.sessions.using(sessionId,{source:'unrealBridge'},async reference=>{const state=reference.binding.session.getSnapshot();if(state.openState!=='open')throw state.openError??new Error('对话尚未就绪');const result=await call();if(!result.ok)throw new Error(result.error.message);return result.value;});
     child.slots.inject('conversation.input.dock',()=>child.slots.register({name:'conversation.input.dock',id:'unreal-bridge',order:20,inject:sessionId=>({read:()=>using(sessionId,()=>child.remote.unrealBridge.state(sessionId)),bind:editorId=>using(sessionId,()=>child.remote.unrealBridge.bind(sessionId,editorId))})},UnrealDock));
   });
