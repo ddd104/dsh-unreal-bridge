@@ -2,7 +2,7 @@
 
 The `@deepseek-ai/dsh-skill-filesystem` runtime dependency and its dependencies are installed separately and retain their bundled licenses and notices (including BSD-3-Clause for the DSH skill provider).
 
-The JavaScript bundles include Zod 4.4.3, under the MIT License below. The `ws` runtime dependency is installed separately and retains its bundled MIT license. The `sharp` runtime dependency is installed separately under Apache-2.0; its platform packages include libvips and other libraries with their own bundled notices and licenses. React is supplied by the DSH host. Unreal Engine itself is not distributed in this package; use of the compiled Unreal Editor module requires a compatible licensed Unreal Engine installation and remains subject to Epic's applicable license.
+The JavaScript bundles include Zod 4.4.3, under the MIT License below. The `ajv` 8.20.0 and `ws` runtime dependencies are installed separately and retain their bundled MIT licenses. Ajv's dependencies are also installed separately and retain their own licenses and notices, including the BSD-3-Clause license of `fast-uri`. The `sharp` runtime dependency is installed separately under Apache-2.0; its platform packages include libvips and other libraries with their own bundled notices and licenses. React is supplied by the DSH host. Unreal Engine itself is not distributed in this package; use of the compiled Unreal Editor module requires a compatible licensed Unreal Engine installation and remains subject to Epic's applicable license.
 
 ## Zod
 

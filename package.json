@@ -1,6 +1,6 @@
 {
   "name": "dsh-unreal-bridge",
-  "version": "0.4.0",
+  "version": "0.4.4",
   "description": "DeepSeek Harness and Unreal Editor session bridge",
   "repository": {
     "type": "git",
@@ -48,6 +48,7 @@
   ],
   "dependencies": {
     "@deepseek-ai/dsh-skill-filesystem": "0.0.1-rc.3",
+    "ajv": "8.20.0",
     "sharp": "0.35.5",
     "ws": "8.22.0",
     "zod": "4.4.3"

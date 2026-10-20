@@ -5,6 +5,10 @@
 #include "EdGraph/EdGraphNode.h"
 #include "Editor.h"
 #include "Engine/Blueprint.h"
+#include "Engine/Level.h"
+#include "Engine/LevelScriptBlueprint.h"
+#include "Engine/LevelStreaming.h"
+#include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "GraphEditor.h"
@@ -19,11 +23,25 @@
 
 namespace
 {
-FString NormalizeAssetPath(const FString& Path)
+FString ExactLoadedObjectPath(const FString& Path)
 {
+    if (Path.IsEmpty()) return {};
     const FString Package = FPackageName::ObjectPathToPackageName(Path);
     if (!Package.StartsWith(TEXT("/")) || !FPackageName::IsValidLongPackageName(Package)) return {};
-    return Package + TEXT(".") + FPackageName::GetShortName(Package);
+    // Only a package-only request gains an object name. A graph, node, or level
+    // Blueprint path must retain every subobject segment exactly as supplied.
+    return Path == Package ? Package + TEXT(".") + FPackageName::GetShortName(Package) : Path;
+}
+
+bool IsSupportedAsset(UObject* Asset)
+{
+    return IsValid(Asset) && !Asset->HasAnyFlags(RF_ClassDefaultObject | RF_ArchetypeObject)
+        && (Asset->IsA<UBlueprint>() || Asset->IsA<UMaterialInterface>() || Asset->IsA<UMaterialFunctionInterface>());
+}
+
+UWorld* CurrentEditorWorld()
+{
+    return GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
 }
 
 void CenterGraph(const TSharedPtr<SGraphEditor>& Editor, const FVector2D& Center)
@@ -128,56 +146,118 @@ void FocusMaterial(IAssetEditorInstance* Instance, UObject* Asset, const FDSHAss
 }
 }
 
+UObject* FDSHAssetPresentation::ResolveSupportedTarget(const FString& ObjectPath)
+{
+    const FString Path = ExactLoadedObjectPath(ObjectPath);
+    if (Path.IsEmpty()) return nullptr;
+    UObject* Object = FindObject<UObject>(nullptr, *Path);
+    if (!IsValid(Object)) return nullptr;
+    // Never infer an editable target from a map, level, actor, or arbitrary
+    // UObject. Only explicitly supported assets and their graph objects qualify.
+    if (Object->IsA<UWorld>() || Object->IsA<ULevel>()) return nullptr;
+    if (IsSupportedAsset(Object)) return Object;
+    if (Object->IsA<UEdGraph>() || Object->IsA<UEdGraphNode>())
+    {
+        UBlueprint* Blueprint = Object->GetTypedOuter<UBlueprint>();
+        return IsSupportedAsset(Blueprint) ? Blueprint : nullptr;
+    }
+    if (Object->IsA<UMaterialExpression>())
+    {
+        for (UObject* Outer = Object->GetOuter(); IsValid(Outer); Outer = Outer->GetOuter())
+            if (IsSupportedAsset(Outer)) return Outer;
+    }
+    return nullptr;
+}
+
+bool FDSHAssetPresentation::CanPresentInWorld(UObject* Asset, const UWorld* EditorWorld)
+{
+    if (!IsSupportedAsset(Asset)) return false;
+    const ULevelScriptBlueprint* LevelBlueprint = Cast<ULevelScriptBlueprint>(Asset);
+    if (!LevelBlueprint) return true;
+    ULevel* Level = LevelBlueprint->GetTypedOuter<ULevel>();
+    if (!IsValid(EditorWorld) || !IsValid(Level) || Level->LevelScriptBlueprint != LevelBlueprint) return false;
+    if (EditorWorld->ContainsLevel(Level)) return true;
+    for (ULevelStreaming* Streaming : EditorWorld->GetStreamingLevels())
+        if (IsValid(Streaming) && Streaming->GetLoadedLevel() == Level) return true;
+    return false;
+}
+
 void FDSHAssetPresentation::Queue(const FDSHAssetViewHint& Hint)
 {
-    if (NormalizeAssetPath(Hint.AssetPath).IsEmpty()) return;
+    UObject* Asset = ResolveSupportedTarget(Hint.AssetPath);
+    if (!CanPresentInWorld(Asset, CurrentEditorWorld())) return;
+    for (FPending& Existing : Pending)
+    {
+        if (Existing.Asset.Get() != Asset || Existing.Hint.Graph != Hint.Graph) continue;
+        Existing.Hint = Hint;
+        Existing.Hint.AssetPath = Asset->GetPathName();
+        return;
+    }
     FPending& Item = Pending.AddDefaulted_GetRef();
     Item.Hint = Hint;
+    Item.Hint.AssetPath = Asset->GetPathName();
+    Item.Asset = Asset;
 }
 
 void FDSHAssetPresentation::Tick()
 {
-    for (int32 Index = 0; Index < Pending.Num();)
+    // Remove work before calling editor APIs, which may broadcast callbacks
+    // that enqueue more work or invalidate the object/current editor world.
+    TArray<FPending> Work = MoveTemp(Pending);
+    Pending.Reset();
+    for (FPending& Item : Work)
     {
-        if (--Pending[Index].FramesRemaining > 0) { ++Index; continue; }
-        if (!Pending[Index].bOpened)
+        if (--Item.FramesRemaining > 0) { Pending.Add(MoveTemp(Item)); continue; }
+        if (!Item.bOpenAttempted)
         {
-            Show(Pending[Index].Hint, false);
-            Pending[Index].bOpened = true;
-            Pending[Index].FramesRemaining = 1;
-            ++Index;
+            Item.bOpenAttempted = true;
+            if (Show(Item, false, true))
+            {
+                Item.FramesRemaining = 1;
+                Pending.Add(MoveTemp(Item));
+            }
             continue;
         }
-        FDSHAssetViewHint Hint = MoveTemp(Pending[Index].Hint);
-        Pending.RemoveAt(Index);
-        Show(Hint, true);
+        Show(Item, true, false); // The focus stage must never open an editor.
     }
 }
 
-void FDSHAssetPresentation::Show(const FDSHAssetViewHint& Hint, bool bFocusCanvas)
+bool FDSHAssetPresentation::Show(const FPending& Item, bool bFocusCanvas, bool bAllowOpen)
 {
-    if (!GEditor || IsRunningCommandlet() || !FSlateApplication::IsInitialized()) return;
-    const FString ObjectPath = NormalizeAssetPath(Hint.AssetPath);
-    if (ObjectPath.IsEmpty()) return;
-    UObject* Asset = LoadObject<UObject>(nullptr, *ObjectPath);
-    if (!Asset) return; // Deleted assets cannot be opened.
+    if (!GEditor || IsRunningCommandlet() || !FSlateApplication::IsInitialized()) return false;
+    UObject* Asset = Item.Asset.Get();
+    if (!CanPresentInWorld(Asset, CurrentEditorWorld())) return false;
     UAssetEditorSubsystem* Editors = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
-    if (!Editors) return;
-    IAssetEditorInstance* Instance = Editors->FindEditorForAsset(Asset, true);
+    if (!Editors) return false;
+    IAssetEditorInstance* Instance = Editors->FindEditorForAsset(Asset, false);
     if (!Instance)
     {
-        if (!Editors->OpenEditorForAsset(Asset)) return;
-        Instance = Editors->FindEditorForAsset(Asset, true);
+        if (!bAllowOpen) return false;
+        // This is the same API used by LevelEditorActions::OpenLevelBlueprint:
+        // pass the actual ULevelScriptBlueprint, never its outer World asset.
+        if (!Editors->OpenEditorForAsset(Asset)) return false;
+        Asset = Item.Asset.Get();
+        if (!CanPresentInWorld(Asset, CurrentEditorWorld())) return false;
+        Instance = Editors->FindEditorForAsset(Asset, false);
     }
-    if (!Instance) return;
+    if (!Instance) return false;
     Instance->FocusWindow(Asset);
+    Asset = Item.Asset.Get();
+    if (!CanPresentInWorld(Asset, CurrentEditorWorld())) return false;
+    Instance = Editors->FindEditorForAsset(Asset, false);
+    if (!Instance) return false;
     TSharedPtr<FTabManager> Tabs = Instance->GetAssociatedTabManager();
     TSharedPtr<SDockTab> Tab = Tabs.IsValid() ? Tabs->GetOwnerTab() : nullptr;
     if (Tab.IsValid()) Tab->ActivateInParent(ETabActivationCause::SetDirectly);
     TSharedPtr<SWindow> Window = Tab.IsValid() ? Tab->GetParentWindow() : nullptr;
     if (!Window.IsValid() && FSlateApplication::IsInitialized()) Window = FSlateApplication::Get().GetActiveTopLevelWindow();
     if (Window.IsValid() && !Window->IsWindowMaximized()) Window->Maximize();
-    if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset)) FocusBlueprint(Instance, Blueprint, Hint, bFocusCanvas);
-    else if (bFocusCanvas) FocusMaterial(Instance, Asset, Hint);
+    Asset = Item.Asset.Get();
+    if (!CanPresentInWorld(Asset, CurrentEditorWorld())) return false;
+    Instance = Editors->FindEditorForAsset(Asset, false);
+    if (!Instance) return false;
+    if (UBlueprint* Blueprint = Cast<UBlueprint>(Asset)) FocusBlueprint(Instance, Blueprint, Item.Hint, bFocusCanvas);
+    else if (bFocusCanvas) FocusMaterial(Instance, Asset, Item.Hint);
+    return true;
 }
 

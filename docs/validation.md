@@ -1,5 +1,50 @@
 # 本机验证记录
 
+## 2026-10-20 工具异常纠正与错误预算
+
+- 默认预算调整为 300 个根工具调用、200 个模型步骤、累计 50 次错误和 30 分钟；显式配置仍有效。成功调用不清零累计错误，换参数、UUID、工具或编辑器绑定不重置预算。
+- `MCP_TOOL_ERROR`、策略拒绝、能力不可用，以及已恢复或未写入的验证失败，均把原始错误返回模型处理，不直接取消整轮。模型应按错误修正或改用许可方式，不能绕过被拒绝的操作。未提供回滚的写入失败须先回读真实状态；完成失败后的修正请求使用新 UUID，超时或断线结果未知则先查询原 UUID，不能盲目重放。
+- ObjectTools 追加数组元素须原样保留旧元素的 JSON 表示，仅添加新项；不得同时把已有字符串引用重编码成 `refPath` 对象。
+- 回滚失败与 `EDITOR_WRITE_LOCKED` 保留跨会话编辑器写锁，并进入最多两次状态查询及最后一次无工具总结；工具、步骤或错误预算耗尽同样收尾。上述情形不直接调用取消接口，总耗时超限仍立即取消。
+- `npm run check` 宿主构建与 192/192 项 JavaScript 测试通过，报告 `.test-state/retry-final-check.log`。覆盖第 49 次失败后纠正成功、成功不清零、第 50 次收尾、重复钩子计数去重、结果未知查询原请求、迟到回滚失败升级保护，以及数组失败→回读原 25 项→保留原表示追加 7 项成功的回环编辑器回归。MCP 内层明确回滚失败或写锁信息向上传递，跨会话写锁仍生效；第三方声称已恢复不自动获得回滚保证。
+- 实际安装的 DSH ToolRuntime/SystemPrompt 11 组检查通过，构建宿主 MCP 输出与纠错链 7 组检查通过；真实 AgentLoop、Session 校验器和 JSONL 后端 8 组检查通过，纠正提示只注入一次并可冷恢复回放，写锁与回滚失败均到达最后说明。报告 `.test-state/retry-guard-runtime.json`、`.test-state/retry-mcp-runtime.json`、`.test-state/retry-session-runtime.json`。使用合成工具、回环编辑器和离线模型适配器，未调用在线模型或修改 EHV 资产，不将这些检查表述为 DeepSeek 已完成原业务任务。
+- 已通过官方插件命令安装到 desktop，配置备份在 `.dsh/profiles/desktop/.plugin-manager/dsh-unreal-bridge-backups/20261020-110040-753`。安装后的宿主及 source map 与本次构建哈希一致；再次对已安装文件运行 MCP 七组与真实会话八组检查全部通过，报告 `.test-state/retry-installed-mcp-runtime.json`、`.test-state/retry-installed-session-runtime.json`。安装器移动的无关本地 `dsh-emotion` 插件已原样移回原位置。
+- 下方按日期记录此前版本的实测结果；其中即时取消策略和旧默认预算已由本节取代。此次只更新 DSH 宿主，完整重启 DSH 后加载，无需重新编译或重启 UE。
+
+## 2026-10-20 原生目标预检与安全后处理（0.4.4）
+
+- 10 月 19 日 22:32 的任务使用了正确的关卡蓝图引用，`add_function_graph` 成功后，旧展示代码把子对象路径降为 World，并在打开/聚焦两阶段重复打开地图。EHV 日志记录两次 `MAP LOAD`；本次退出没有新崩溃调用栈，不能推断具体底层崩溃指令。修复同时覆盖调用前和调用后的目标检查，不把这次问题简化为模型参数错误。
+- 宿主保留精确 JSON schema 校验，新增绑定版本检查，A→B→A 也使预检失效。执行 MCP 必须具备 `mcp_target_validation`，旧编辑器可以发现工具但不能绕过原生预检执行。UE 在快照、工具派发和请求日志写入前，从当前注册表重新读取 schema，检查 UObject 真实类型、`Class@` 继承、graph/node 库存与归属及 PinID。校验不执行工具探测、不导入属性、不加载资产；顶层未加载资产可用注册表类型证据，未加载子对象及未知引用类型拒绝。
+- 原生 `MCP_TARGET_* / execution:not_started` 拒绝不消费执行 UUID，宿主保留原错误类型与细节；纠正参数后可使用相同 UUID，已执行的结果继续去重。嵌套调度拒绝；跨蓝图批量 `get_node_infos` 允许独立读取，连线、布局等上下文操作保持归属约束。已有 DataTable 有损写入策略和未知写入失败保护保留。
+- 布局保留原 owner/graph 弱身份，路径/GUID 被替换对象复用时不套用旧快照。展示仅使用已加载的受支持资产，保留真实关卡蓝图身份，禁止打开 World/Level；关卡必须属于当前编辑世界或其已加载流送关卡。首次至多打开一次，第二阶段只聚焦；失效后不按同名路径重绑。手动 focus 保留子对象路径，同样检查展示能力、真实类型和当前世界归属。
+- `npm run check` 通过 187 项宿主测试；UE 5.8.2 完整 Editor 目标与增量构建成功。新原生回归九项通过（目标校验三项、展示四项、关卡查询两项），旧布局、MCP 展示提示、蓝图事务与定时器回归十一项通过。证据 `.test-state/target-validation-host-check-final.log`、`target-validation-native-build-final.log`、`target-validation-native-build-fixture.log`、`target-validation-regression-report/index.json`。首轮展示测试夹具创建抽象 UObject 触发 ensure，已改用具体 DataTable 对象；通过结果来自修正后重新运行的报告。
+- `scripts/mcp-target-validation-e2e.mjs` 在独立 HostProject 的六组真实桥接验证通过：错误 World→Blueprint 不修改地图；同 UUID 改为真实 level BP 后新建函数且未保存；错误或不存在 DataTable 引用拦截；普通 Actor 蓝图正常；嵌套节点类型错误拦截；跨蓝图排版拒绝且双方状态不变。报告 `.test-state/target-validation-e2e-final/result.json`；本次未修改或保存 EHV 资产，没有调用模型。
+- 预检证明目标的类型和已覆盖的归属条件，不证明任意第三方工具的全部属性写权限、图语法、引脚类型兼容或内部实现安全。编译、业务结果和保存仍需具体操作验证。本版本需同步更新 DSH 宿主与编译后的 UE 插件，重启两端生效。
+
+## 2026-10-19 收尾消息持久化失败（宿主 0.4.3）
+
+- 会话 `session-c0891fc4-fdcd-43b1-98a5-93e8ac9ee385` 第 2 轮在北京时间 21:40:45–21:40:57 失败。两次 `unreal_mcp_describe` 传空 `query`，一次 `get_properties` 使用 `object/property_names` 而非真实的 `instance/properties`，累计三次本地参数错误，触发正常收尾。随后 0.4.2 新增提示以 `role:developer` 经 `agent/pre-step` 返回；该入口只接受用户角色并统一写入 `user/message`，真实会话校验在 seq 247 拒绝消息，最终 seq 248 以 `UNKNOWN` 结束。此前仅验证消息构造与 ToolRuntime，遗漏会话保存路径，这是 0.4.2 引入的回归。
+- 提示改为符合官方 `UserMessage` 约定的用户角色 notice；已取消、下游明确清空输入、空首步时保留原决定，避免提示重新激活被抑制的步骤。参数说明和指南补充空查询应省略、紧凑列表不含 schema、调用前须定向读取完整参数定义。
+- `npm run check` 通过 183/183 项测试，其中守卫 34 项；真实已安装 DSH SystemPrompt/ToolRuntime 八组验收及构建宿主 MCP 输出六组验收通过，报告 `.test-state/notice-host-check.log`、`notice-guard-runtime-check.json`、`notice-built-runtime-check.json`。
+- 新增 `scripts/execution-notice-session-check.mjs`：使用真实已安装 AgentLoop、Session 校验器与 JSONL 后端，旧 developer 提示负例确实复现同一异常；预警、调用耗尽、错误耗尽、步骤耗尽四条实际循环均到达最终回复，提示成功保存，三类收尾最终工具列表为空。刷新落盘并关闭后端后，以新后端读取并通过 `Session.fromRestore` / `Session.create` 回放全部事件。报告 `.test-state/execution-notice-session-check.json`。模型响应使用离线适配器，不将本测试视为业务任务生成成功。
+- 原失败轮次在 UE 仅执行 `get_default_object` 和 `get_graph_dsl_docs` 两次成功读取，无资产修改或保存。本补丁只更新 DSH 宿主；原生 UE 保持 0.4.2，不需重编译或重启 UE。
+
+## 2026-10-19 调用预算收尾与关卡蓝图入口（0.4.2）
+
+- 针对 `session-c0891fc4-fdcd-43b1-98a5-93e8ac9ee385` 的第 41 次工具调用硬取消，默认预算改为 120 次工具、80 个模型步骤和 600 秒，显式较小配置保持有效。80% 时通过工具结果和模型步骤消息提示剩余预算；普通调用、步骤或可纠正错误预算耗尽停止新操作，保留最多两次状态恢复查询和有限收尾，恢复阶段加最后无工具总结最多两次额外采样。最后采样通过官方 `system-prompt/assemble` 去掉全部工具；写入错误、完整性、策略与超时仍立即取消。
+- `npm run check` 构建及 181/181 项 JavaScript 测试通过。32 项守卫测试覆盖 39→41 次继续、120 次之后拒绝、恢复次数与根调用去重、无工具收尾、下游拒绝不消耗收尾采样、旧轮次预检拒绝后迟到回调隔离，以及全部致命保护。
+- 实际安装的 DSH SystemPrompt/ToolRuntime 八组验收通过，报告 `.test-state/execution-budget-runtime-check.json`；验证明确的 `EXECUTION_BUDGET_EXHAUSTED`、零普通预算取消、真实工具列表过滤和最后零工具 schema。构建插件的实际 DSH 输出、原始错误、旧编辑器能力提示六组验证通过，报告 `.test-state/interruption-runtime-check.json`。
+- 新增只读 `unreal_level_blueprint` 和 UE `level_blueprint_lookup` 能力，从地图取得现有蓝图、图引用和地图保存目标，不创建蓝图、不切换世界、不改变名称或原 dirty 状态。两组原生自动化通过；`scripts/level-blueprint-e2e.mjs` 的四项真实 UE 5.8.2 验收通过，使用返回引用调用现有 MCP `list_graphs` 和 `read_graph_dsl` 成功。报告 `.test-state/level-blueprint-e2e-final/result.json`，不涉及 EHV 资产或地图保存。
+- 已备份并安装 EHV 的 0.4.2 原生 DLL、符号、模块描述和对应源码，八个文件哈希一致；记录 `.test-state/interruption-editor-installed.json`。运行中的编辑器继续持有旧映像，未结束用户进程；退出并重启 UE 后加载新能力。DSH 宿主也须重启加载预算及指南更新。普通蓝图原生预览、应用与保存仍不接受关卡子对象，关卡图读写通过发现的 MCP 工具执行并遵循其失败保证。
+
+## 2026-10-19 MCP 调用适配与错误恢复（0.4.1）
+
+- 复现 DSH 会话 `session-9a36baf9-bbba-40c7-aea5-bbfcc8fb12b4` 的失败：工具完整名被重复拼接，`dataTablePath` 与真实的 `data_table` 参数不符，首次读取失败触发整轮取消。发现结果现在同时返回短名与完整名；调用自动规范化，并在同一编辑器获取当前 schema，用 Ajv 检查必填、类型、嵌套引用及未知参数，未通过时不派发执行。
+- 已核验的 DataTable 查询错误保留 UE 原文并允许预算内纠正；未知或写入错误、策略拦截、完整性及回滚失败继续停止。覆盖原始封装、空或省略工具集的顶层调用、完整名隐藏的嵌套调度、跨编辑器 schema、绑定切换及只读超时，调用规范化后重新检查策略。
+- 宿主构建成功，168/168 项 JavaScript 测试通过；依赖审计无已知漏洞。`scripts/mcp-read-e2e.mjs` 在隔离 UE 5.8.2 HostProject 的四项验收通过：真实 schema 与短名、原错误参数零派发、完整名读取失败保留原文、同会话后续查询成功并返回 18 个结构。证据 `.test-state/mcp-adapter-live/result.json` 与 `editor.log`；未修改 EHV 资产、未调用模型。
+- `scripts/mcp-runtime-check.mjs` 使用实际安装的 Cordis 4.0.5 与 DSH ToolRuntime 0.2.1-rc.2 验证工具输出。先复现错误详情含 `undefined` 时被严格 JSON 校验拒绝，再确认修复后的原始 UE 错误、参数预检、顶层工具未找到、无请求编号的发现错误均通过 output schema 与 render；只读错误可纠正继续，未触发取消。报告 `.test-state/mcp-contract-runtime-check.json`，仅使用合成回环编辑器和只读包解析元数据。
+- 已通过 DSH 官方插件命令安装 desktop 宿主 0.4.1，保留配置备份。只涉及宿主 JavaScript 与依赖，不需重编译 UE；完整退出并重启 DSH 后加载新代码。
+
 ## 2026-10-19 蓝图编辑后自动布局
 
 - UE 插件新增 `automatic_graph_layout` 能力。原生补丁在整批编辑结束后整理目标函数或事件块，再编译并记录最终版本；布局纳入原编辑事务。UE MCP 成功调用通过编辑前后的图内容差异识别目标，返回前完成整理，并在 `dshLayout` 中报告最终版本、警告和独立撤销步骤。读取、撤销、显式移动及显式排版不重复触发整理。

@@ -66,7 +66,7 @@ test('DSH tools require a session and actual approval before writing',async t=>{
   const exec={agent:{session:{id:'s'}},name:'unreal_apply',callId:'call',signal:new AbortController().signal};const p=await b.preview('s','patch',patch());const args={previewId:p.previewId,requestId:randomUUID()};
   assert.equal((await tools.get('unreal_state').execute({},{})).error.code,'SESSION_REQUIRED');
   assert.equal((await tools.get('unreal_apply').execute(args,exec)).error.code,'PERMISSION_DENIED');assert.equal(writes,0);approve=true;assert.equal((await tools.get('unreal_apply').execute(args,exec)).ok,true);assert.equal(writes,1);
-  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,23);
+  assert.equal(services.get('unrealBridge').typertRemote.service,services.get('unrealBridge'));assert.equal(tools.size,24);
 });
 
 test('bridge writes use the configured approval policy',async t=>{
@@ -82,11 +82,16 @@ test('bridge writes use the configured approval policy',async t=>{
 
 test('asset focus stays in the bound editor and rejects older plugins',async t=>{
   const b=await fixture(t);const calls=[];
-  await editor(b,'A',m=>{calls.push({editor:'A',method:m.method,params:m.params});return{queued:true};},['focus_asset']);
+  await editor(b,'A',m=>{calls.push({editor:'A',method:m.method,params:m.params});return{queued:true};},['focus_asset','safe_asset_presentation']);
   await editor(b,'B',m=>{calls.push({editor:'B',method:m.method});return{queued:true};});
   b.bind('chat','A');
   assert.deepEqual(await b.focus('chat',{assetPath:'/Game/BP_Test',graph:'EventGraph',nodeIds:['node-1']}),{queued:true});
   assert.deepEqual(calls,[{editor:'A',method:'focus_asset',params:{assetPath:'/Game/BP_Test',graph:'EventGraph',nodeIds:['node-1']}}]);
+  const level='/Game/Maps/Map_Test.Map_Test:PersistentLevel.Map_Test';
+  assert.deepEqual(await b.focus('chat',{assetPath:level}),{queued:true});
+  assert.equal(calls.at(-1).params.assetPath,level,'focus preserves the exact level Blueprint reference');
+  await editor(b,'old',()=>({queued:true}),['focus_asset']);b.bind('chat','old');
+  await assert.rejects(b.focus('chat',{assetPath:'/Game/BP_Test'}),{code:'FOCUS_SAFETY_UNAVAILABLE'});
   b.bind('chat','B');
   await assert.rejects(b.focus('chat',{assetPath:'/Game/BP_Test'}),{code:'FOCUS_UNAVAILABLE'});
 });
@@ -99,8 +104,14 @@ test('UE MCP calls run without approval and stay in the bound editor with reques
   await apply(ctx,{stateDir,port:0});
   const bridge=services.get('unrealBridge').bridge;
   t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
-  await editor(bridge,'A',message=>{calls.push(['A',message]);return{content:[{type:'text',text:message.method}]};},['mcp_tools']);
-  await editor(bridge,'B',message=>{calls.push(['B',message]);return{content:[{type:'text',text:message.method}]};},['mcp_tools']);
+  await editor(bridge,'A',message=>{
+    calls.push(['A',message]);
+    const inputSchema={type:'object',properties:{}};
+    if(message.method==='mcp_discover'&&message.params.name==='describe_toolset')return {content:[{type:'text',text:JSON.stringify({name:'EditorToolset',tools:[{name:'EditorToolset.GetSelectedAssets',inputSchema}]})}]};
+    if(message.method==='mcp_list_tools')return {tools:[{name:'list_toolsets',inputSchema}]};
+    return{content:[{type:'text',text:message.method}]};
+  },['mcp_tools','mcp_target_validation']);
+  await editor(bridge,'B',message=>{calls.push(['B',message]);return{content:[{type:'text',text:message.method}]};},['mcp_tools','mcp_target_validation']);
   bridge.bind('chat','A');
   const exec={agent:{session:{id:'chat'}},name:'unreal_mcp_call_toolset',callId:'call',signal:new AbortController().signal};
   assert.equal((await tools.get('unreal_mcp_toolsets').execute({},exec)).ok,true);
@@ -137,9 +148,9 @@ test('UE MCP toolset descriptions can be filtered before reaching the model',asy
   await editor(bridge,'UE1',message=>({content:[{type:'text',text:JSON.stringify(description)}]}),['mcp_tools']);
   bridge.bind('chat','UE1');
   const compact=await bridge.mcpDescribe('chat',{toolsetName:'BlueprintTools',query:'add_event',includeSchema:false});
-  assert.deepEqual(JSON.parse(compact.content[0].text).tools,[{name:'BlueprintTools.add_event',description:'Add an event.'}]);
+  assert.deepEqual(JSON.parse(compact.content[0].text).tools,[{name:'add_event',fullName:'BlueprintTools.add_event',toolsetName:'BlueprintTools',description:'Add an event.'}]);
   const exact=await bridge.mcpDescribe('chat',{toolsetName:'BlueprintTools',query:'add_event'});
-  assert.deepEqual(JSON.parse(exact.content[0].text).tools,[description.tools[0]]);
+  assert.deepEqual(JSON.parse(exact.content[0].text).tools,[{...description.tools[0],name:'add_event',fullName:'BlueprintTools.add_event',toolsetName:'BlueprintTools'}]);
 });
 
 test('project knowledge queries stay on the bound editor and require its capability',async t=>{

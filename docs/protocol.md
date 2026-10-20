@@ -17,12 +17,13 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_knowledge_record` | `tool`、`arguments`、UUID `requestId`，按配置保存带来源的推断或经验；写入项目缓存并支持请求状态查询 |
 | `unreal_mcp_tools` | `{}`，列出当前 UE 实例注册的顶层 MCP 工具与参数 schema |
 | `unreal_mcp_toolsets` | `{}`，列出当前 UE 实例中的工具集 |
-| `unreal_mcp_describe` | `toolsetName`，可选 `query` 按工具名过滤、`includeSchema: false` 返回简短列表；需要调用的工具再取得精确参数 schema |
-| `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`，默认直接调用工具集函数 |
+| `unreal_mcp_describe` | `toolsetName`，可选 `query` 按工具名过滤、`includeSchema: false` 返回简短列表；返回短名 `name`、完整名 `fullName`、`toolsetName` 及可选参数 schema |
+| `unreal_mcp_call_toolset` | `toolsetName`、`toolName`、`arguments`、UUID `requestId`；`toolName` 接受短名或当前工具集完整名，参数预检通过后调用 |
 | `unreal_mcp_call` | `name`、`arguments`、UUID `requestId`，默认直接调用顶层 MCP 工具 |
 | `unreal_data_table_copy_property` | `assetPath`、`sourceRow`、`propertyName`、UUID `requestId`，可选 `targetRows`；原生深复制指定字段，验证并回滚，不保存 |
 | `unreal_read_blueprint` | `assetPath`，可选 `graph`、`nodeIds`、`detail: summary/full` |
-| `unreal_focus_asset` | `assetPath`，可选 `graph`、`nodeIds`；手动打开并最大化资产编辑器，节点可识别时聚焦；返回 `queued` 表示展示任务已排队 |
+| `unreal_level_blueprint` | `mapPath`，只读定位地图内的关卡蓝图，返回 `blueprint:{refPath}`、`graphs`、`mapPath` 和 `saveTarget:{refPath}`，供 MCP 图工具使用 |
+| `unreal_focus_asset` | `assetPath`，可选 `graph`、`nodeIds`；对已加载且受支持的真实资产或图引用排队展示，保留关卡子对象路径；不打开地图，需 `safe_asset_presentation` 能力 |
 | `unreal_preview_create` | `assetPath`、`parent: Actor/ActorComponent/Object` |
 | `unreal_preview_patch` | `assetPath`、`graph`、`baseRevision`、`operations` |
 | `unreal_apply` | `previewId`、UUID `requestId`，按配置应用，默认不保存 |
@@ -30,17 +31,27 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 | `unreal_undo` | `assetPath`、`baseRevision`、UUID `requestId` |
 | `unreal_save` | `assetPath`、`baseRevision`、UUID `requestId` |
 
-每个工具需要所属 DSH 对话；其他对话不能使用本对话的 previewId。预览五分钟有效；绑定不同实例、断线或蓝图变化会阻止使用旧预览。资产路径使用 `/Game/Folder/BP_Name` 或对应对象路径，不能使用磁盘 `.uasset` 路径。
+每个工具需要所属 DSH 对话；其他对话不能使用本对话的 previewId。预览五分钟有效；绑定不同实例、断线或蓝图变化会阻止使用旧预览。原生工具的资产路径使用 `/Game/Folder/BP_Name` 或对应对象路径，不能使用磁盘 `.uasset` 路径。MCP 资产 `refPath` 应使用 `/Game/Folder/BP_Name.BP_Name` 完整对象路径，不能由原生工具接受包路径推断 MCP 引用也接受包路径。
 
-### DataTable 写入与宿主熔断
+### DataTable 写入与宿主错误恢复
 
 `data_table_copy_property` 能力启用原生字段复制请求。`sourceRow` 与目标行名最长 1024 字符，`propertyName` 为最多 160 字符的精确反射属性名；`targetRows` 省略时选择除源行外所有行，显式数组必须非空、无重复、不含源行，最多 4096 行。预检无效参数不会写入资产。操作在 GameThread 内以单次事务深复制字段，验证源行、目标字段、其他字段和行集合，失败恢复内存快照及原始 dirty 状态。成功返回 `assetPath/sourceRow/propertyName/targetCount/changedRows/unchangedRows/verified/saved/dirtyBefore/dirtyAfter`；`verified:true`、`saved:false`。不触发窗口聚焦。
 
 完整性失败返回 `DATA_TABLE_VERIFICATION_FAILED`，错误 `details.rollback` 为 `restored` 或 `failed`；失败前未写入时为 `not_needed`。宿主收到 `failed` 或缺少成功验证结果时锁定该编辑器后续写入，跨会话、新请求 ID 和重新绑定均不能绕过。历史请求重放保持原错误与回滚状态。
 
-发送 MCP 前检查完整工具名和 `call_tool` 封装；有损 DataTable JSON 修改、脚本执行及默认关闭的桌面输入返回 `MCP_POLICY_BLOCKED`、`details.retryable:false`。MCP 内层 `isError:true` 或 `ok:false` 转为 `MCP_TOOL_ERROR`，`rollback:not_available`，不能误报恢复完成。任意通用 MCP 写入不获得原生 DataTable 的回滚保证。
+发送 MCP 前检查完整工具名和 `call_tool` 封装，名称规范化后再次检查，不能利用完整名隐藏嵌套的调度入口；有损 DataTable JSON 修改、脚本执行及默认关闭的桌面输入返回 `MCP_POLICY_BLOCKED`、`details.retryable:false`。该标记禁止重复被拦截的操作，不取消整轮；模型可改用许可方式或说明当前限制。能力不可用也返回模型处理，不能通过脚本或替代入口绕过。MCP 内层 `isError:true` 或 `ok:false` 均保留原始错误：已确认只读的 `DataTableTools.get_schema/list_rows/get_rows/search_row_structs` 返回 `MCP_READ_ERROR`，其他未知或写入工具返回 `MCP_TOOL_ERROR`，均允许在预算内根据错误纠正后继续。完整性检查失败且 `rollback:restored` 或 `not_needed` 时也保留纠正机会。
 
-宿主按真实用户轮次限制 UE 激活后的全部根工具和模型步骤，嵌套调度按根调用去重。默认 40 调用、40 步、3 次累计错误和 180 秒；只读成功不清空错误计数。达到限制、完整性错误或被禁路线时以 `agent.cancel({kind:'hook',reason}, {keepInbox:true})` 取消当前轮，保留后续用户消息。新 UUID 或换工具不刷新预算；`unreal_state.executionSafety` 和 `writeLock` 分别暴露轮次状态及编辑器写锁。
+`rollback:not_available` 不表示已恢复，也不能据此断定只读失败写坏了资产。任意通用 MCP 写入不获得原生 DataTable 的回滚保证；写入失败未提供回滚时，模型须先读取真实状态，再修正操作，不能原样盲重放。已结束失败的请求修正后使用新 UUID；超时、断线等结果未知时先用原 UUID 查询 `unreal_request_status`。`MCP_TARGET_* / execution:not_started` 的预检拒绝未消费 UUID，仍适用下文的原 UUID 复用规则。ObjectTools 数组追加必须保留旧元素读取返回的 JSON 表示，只增加新元素；已有字符串引用不能顺手改成 `refPath` 对象，否则会被识别为同时改旧值和插入。
+
+宿主按真实用户轮次限制 UE 激活后的全部根工具和模型步骤，嵌套调度按根调用去重。默认 300 调用、200 步、50 次累计错误和 1800 秒；成功调用不清空错误计数，50 次是整轮错误上限而非对同一请求的自动重放次数。接近上限时，工具返回的 `executionSafety.warning` 与 `executionSafety.remaining` 提供预警和剩余额度。工具次数、模型步骤或错误预算耗尽后进入 `summary` 模式，停止执行新的任务工具，最多保留两次 `unreal_state` / `unreal_request_status` 恢复查询、一个有限恢复阶段和最后一次无工具总结，合计最多两次额外模型采样；预算耗尽不立即调用 `agent.cancel`。恢复阶段只向模型提供上述两种查询工具，最终总结阶段不提供任何工具。模型应据已有证据说明完成情况、未完成部分和保存状态，不继续规划修改。
+
+回滚失败或 `EDITOR_WRITE_LOCKED` 同样进入上述状态查询与无工具总结，编辑器写锁继续生效，不直接取消当前轮。总耗时超限仍以 `agent.cancel({kind:'hook',reason}, {keepInbox:true})` 立即取消当前轮，保留后续用户消息。新 UUID、换工具或重新绑定不刷新预算；只有新的用户轮次重置预算，不能清除编辑器写锁。`unreal_state.executionSafety` 和 `writeLock` 分别暴露轮次状态及编辑器写锁。
+
+### 关卡蓝图定位
+
+`unreal_level_blueprint({mapPath:"/Game/Maps/Map_SR"})` 是只读查询，需要 UE 声明 `level_blueprint_lookup` 能力。返回地图对应的真实 `blueprint:{refPath}`、`graphs`、完整地图对象路径 `mapPath` 及 `saveTarget:{refPath}`；模型使用返回引用继续发现并调用 MCP 蓝图图工具，不猜测关卡蓝图对象路径。原生 `unreal_read_blueprint`、预览与补丁接口依旧仅处理普通蓝图，不能把关卡蓝图引用传入这些接口，也不能将原生事务与回滚保证套用到 MCP 关卡图修改。保存关卡蓝图时按返回的 `saveTarget` 和实际 MCP 保存工具 schema 操作。
+
+旧 UE 不支持时返回 `LEVEL_BLUEPRINT_LOOKUP_UNAVAILABLE`，应说明需要更新 UE 插件，不搜索桥接源码、执行脚本或操作窗口寻找替代入口。此能力需要安装重新编译的 UE 插件并重启编辑器，以及更新 DSH 宿主；预算和收尾逻辑仅需更新宿主。
 
 ### 运行实例与历史快照
 
@@ -60,7 +71,32 @@ UE 同时跟踪最多 1024 个 Actor/组件句柄，达到上限时回收最久�
 
 资产增删改查优先走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 仍会拒绝调用。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用蓝图补丁的预览与版本机制。
 
-成功的蓝图创建、应用和撤销，以及能够识别目标资产的 MCP 修改，会在编辑器下一帧排队展示该资产。展示只改变窗口和画布，不参与资产写入事务，也不改变写入的去重结果。蓝图和动画蓝图按节点 GUID 聚焦，材质按表达式 GUID 或节点 GUID 聚焦；未知节点保留当前画布视角。新增工具可以向展示服务提供资产、图与节点信息，而不需要重复实现窗口控制。
+`unreal_mcp_describe` 把工具名称拆为 `name`（如 `get_schema`）、`fullName`（如 `editor_toolset.toolsets.data_table.DataTableTools.get_schema`）和 `toolsetName`。`unreal_mcp_call_toolset` 将短名或匹配当前工具集的完整名规范为短名，再构造执行请求，避免重复前缀。每次执行前，宿主从同一绑定编辑器取得目标工具的精确 schema，用 Ajv 检查缺少必填字段、参数类型等问题；预检失败不发送执行请求，返回可修正错误。`unreal_mcp_call` 的 `call_tool` 封装共用此预检；省略或留空 `toolset_name` 时，按 `tool_name` 解析顶层工具，校验该目标工具的内层参数，再直接调用目标，不能只校验宽泛的外层封装。`call_tool` 调用自身被拒绝。桥接不猜参数，也不把 camelCase 自动改成下划线字段；以 schema 为准。
+
+例如，读取 DataTable schema 的 `unreal_mcp_call_toolset` 参数如下（资产路径替换为工程内实际路径）：
+
+```json
+{
+  "toolsetName": "editor_toolset.toolsets.data_table.DataTableTools",
+  "toolName": "get_schema",
+  "arguments": {
+    "data_table": {"refPath": "/Game/Data/DT_Obstcale_EHV1.DT_Obstcale_EHV1"}
+  },
+  "requestId": "de5b298e-f698-45a2-bb19-c8ef6b4bad02"
+}
+```
+
+不要以 `dataTablePath` 代替 `data_table`，也不要把资产引用对象改成裸路径字符串；`refPath` 中保留 `.DT_Obstcale_EHV1` 对象名后缀，裸包路径可能在 UE 解析时失败。名称与 JSON schema 校验在宿主实现；0.4.4 还要求 UE 原生目标校验，因此须更新两端插件。
+
+### 统一目标校验
+
+执行 MCP 需要 `mcp_target_validation` 能力。宿主取得当前 schema 后核对绑定版本；即使 A→B→A 切回原实例，也使旧预检失效。UE 在同一执行入口、图快照和请求去重日志写入前，从当前注册表重新取得目标工具 schema，以原生类型核验每个 `refPath` 的真实 UObject 类、`Class@` 继承关系、图与节点库存、蓝图归属及 PinID 存在性。数组引用同样检查，未知引用类型和嵌套 dispatcher 被拒绝。新建输出路径是普通参数，不因目标尚未存在而拒绝创建。
+
+校验不调用工具探测，不使用属性导入器创建对象，不加载资产或切换地图。已加载对象按真实身份校验；未加载顶层资产可使用资产注册表的类型证据，未加载的类或子对象引用无法确认时拒绝。返回 `MCP_TARGET_*` 且 `details.execution:"not_started"` 的错误表示工具尚未执行，包含可用的参数位置、期望与实际类型；此时可纠正参数后复用原 UUID。已经执行的成功、失败和未知结果继续遵循原去重与写入保护，不因预检错误规则而放开重跑。
+
+`unreal_state.toolSafety` 分别报告宿主参数校验、原生目标校验和安全展示能力。此层不证明任意工具内部无缺陷，也不取代具体操作的属性写权限、连线兼容性、业务结果及保存验证。`get_` / `find_` 名称并不保证无副作用；DataTable 有损 JSON 写入仍按既有策略拒绝。
+
+成功的蓝图创建、应用和撤销，以及能够识别目标资产的 MCP 修改，可为已加载的受支持资产排队展示。图和节点解析到真实所属蓝图，关卡蓝图保留完整子对象身份；World、Level、任意 UObject 和未知资产不自动打开。关卡蓝图只有属于当前编辑世界或其已加载流送关卡时才展示，绝不以打开地图作为回退。同一展示最多打开一次编辑器，第二阶段只聚焦已经打开的窗口；跨帧使用弱身份，失效后不按同名路径重绑。蓝图和动画蓝图按节点 GUID 聚焦，材质按表达式 GUID 或节点 GUID 聚焦。展示跳过不等于工具失败，也不证明已保存。布局同样保留原 owner/graph 弱身份，失效或替换对象不继承旧快照。
 
 补丁示例（现有节点编号与引脚名必须先读取）：
 

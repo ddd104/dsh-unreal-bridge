@@ -3,8 +3,14 @@
 #include "DSHAssetViewHint.h"
 #include "Dom/JsonObject.h"
 
+class UBlueprint;
+class UEdGraph;
+
 struct FDSHMcpGraphSnapshot
 {
+    // A path alone must never retarget layout to a replacement object after a map reload.
+    TWeakObjectPtr<UBlueprint> Owner;
+    TWeakObjectPtr<UEdGraph> Graph;
     FString AssetPath;
     FString GraphPath;
     FGuid GraphGuid;

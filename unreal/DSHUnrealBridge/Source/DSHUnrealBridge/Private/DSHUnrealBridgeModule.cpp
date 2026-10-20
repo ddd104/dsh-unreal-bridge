@@ -1,8 +1,10 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
 #include "DSHDataTableOps.h"
+#include "DSHLevelBlueprintLookup.h"
 #include "DSHAssetPresentation.h"
 #include "DSHMcpEditAdapter.h"
+#include "DSHMcpTargetValidation.h"
 #include "DSHEditorSelection.h"
 #include "DSHRuntimeInspector.h"
 #include "DSHVisualCapture.h"
@@ -13,6 +15,7 @@
 #include "Containers/Ticker.h"
 #include "Containers/Queue.h"
 #include "Engine/Blueprint.h"
+#include "Editor.h"
 #include "HAL/PlatformProcess.h"
 #include "IWebSocket.h"
 #include "Misc/CommandLine.h"
@@ -118,7 +121,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("automatic_graph_layout")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message,const TSharedPtr<FJsonObject>& Details=nullptr)
     {
@@ -143,6 +146,15 @@ private:
         const FString Id=Field(Message,TEXT("id")),Method=Field(Message,TEXT("method"));double Protocol=0;const TSharedPtr<FJsonObject>* ParamsPtr=nullptr;
         if(Id.IsEmpty()||Id.Len()>160||!Message->TryGetNumberField(TEXT("protocol"),Protocol)||Protocol!=1||!Message->TryGetObjectField(TEXT("params"),ParamsPtr)){Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("Invalid request envelope")));return;}
         const auto Params=*ParamsPtr;
+        if(Method==TEXT("resolve_level_blueprint"))
+        {
+            FString LookupCode,LookupError;
+            const auto Result=FDSHLevelBlueprintLookup::Resolve(Params,LookupCode,LookupError);
+            auto Response=Result?MakeShared<FJsonObject>():Error(Id,LookupCode,LookupError);
+            if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
+            if(FTCHARToUTF8(*Encode(Response)).Length()>2*1024*1024)Response=Error(Id,TEXT("RESPONSE_TOO_LARGE"),TEXT("Level Blueprint graph summaries exceed the bridge response limit"));
+            Send(Response);return;
+        }
         if(Method==TEXT("runtime_snapshot"))
         {
             FString RuntimeCode,RuntimeError;
@@ -168,6 +180,10 @@ private:
         {
             FDSHAssetViewHint Hint;
             Hint.AssetPath=Field(Params,TEXT("assetPath"));Hint.Graph=Field(Params,TEXT("graph"));
+            UObject* FocusTarget=FDSHAssetPresentation::ResolveSupportedTarget(Hint.AssetPath);
+            if(!FocusTarget){Send(Error(Id,TEXT("FOCUS_TARGET_UNAVAILABLE"),TEXT("Only an already-loaded supported asset or its graph can be focused; maps and arbitrary objects are not presentation targets")));return;}
+            if(!FDSHAssetPresentation::CanPresentInWorld(FocusTarget,GEditor?GEditor->GetEditorWorldContext().World():nullptr)){Send(Error(Id,TEXT("FOCUS_WOULD_SWITCH_MAP"),TEXT("This level Blueprint does not belong to the current editor world; focusing must not open or reload its map")));return;}
+            Hint.AssetPath=FocusTarget->GetPathName();
             const TArray<TSharedPtr<FJsonValue>>* NodeIds=nullptr;
             if(Params->TryGetArrayField(TEXT("nodeIds"),NodeIds))for(const auto& Node:*NodeIds)if(Node.IsValid()&&Node->Type==EJson::String)Hint.NodeIds.Add(Node->AsString());
             Presentation.Queue(Hint);
@@ -181,6 +197,22 @@ private:
         {
             const FTCHARToUTF8 Bytes(*(Method+Encode(Params)));const FString Hash=FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
             if(const FString* Previous=RequestHashes.Find(Id)){if(*Previous!=Hash)Send(Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters")));else if(Results.Contains(Id))Send(Results[Id]);else if(PendingMcp.Contains(Id)||PendingKnowledge.Contains(Id))Send(Error(Id,TEXT("IN_PROGRESS"),TEXT("This tool call is still running; query request status")));else Send(Error(Id,TEXT("RESULT_EXPIRED"),TEXT("This write already ran; cached result expired, do not repeat")));return;}
+            if(Method==TEXT("mcp_call_tool"))
+            {
+                const TSharedPtr<FJsonObject>* ToolArguments=nullptr;
+                FString ValidationCode,ValidationMessage;TSharedPtr<FJsonObject> ValidationDetails;
+                if(!Params->TryGetObjectField(TEXT("arguments"),ToolArguments)||!ToolArguments||!ToolArguments->IsValid())
+                {
+                    Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("MCP tool arguments object is required")));return;
+                }
+                // Inspect current native tool metadata and real UObject types on
+                // the game thread before snapshots, tool execution or journaling.
+                // Rejected requests may be corrected without a new request UUID.
+                if(!FDSHMcpTargetValidation::Validate(Field(Params,TEXT("name")),*ToolArguments,ValidationDetails,ValidationCode,ValidationMessage))
+                {
+                    Send(Error(Id,ValidationCode,ValidationMessage,ValidationDetails));return;
+                }
+            }
             if(RequestHashes.Num()>=10000){Send(Error(Id,TEXT("REQUEST_LIMIT"),TEXT("Write request journal is full; restart the editor after reconciling pending requests")));return;}
             RequestHashes.Add(Id,Hash);
         }

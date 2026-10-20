@@ -15,6 +15,7 @@
 #include "Misc/Paths.h"
 #include "ScopedTransaction.h"
 #include "Serialization/JsonSerializer.h"
+#include "UObject/Package.h"
 
 namespace
 {
@@ -105,12 +106,25 @@ void UnwrapCall(const FString& ToolName, const TSharedPtr<FJsonObject>& Argument
 
 FString NormalizeMcpAssetPath(const FString& Path)
 {
-    FString RootObject = Path;
-    int32 SubobjectStart = INDEX_NONE;
-    if (RootObject.FindChar(TEXT(':'), SubobjectStart)) RootObject.LeftInline(SubobjectStart);
-    const FString Package = FPackageName::ObjectPathToPackageName(RootObject);
+    // Resolve the existing target's real owner. In particular a level Blueprint
+    // remains /Map.Map:PersistentLevel.Map, never the World /Map.Map.
+    UObject* Object = FindObject<UObject>(nullptr, *Path);
+    if (Object && !Object->IsA<UPackage>())
+    {
+        if (UBlueprint* Blueprint = Cast<UBlueprint>(Object)) return Blueprint->GetPathName();
+        if (UBlueprint* Blueprint = Object->GetTypedOuter<UBlueprint>()) return Blueprint->GetPathName();
+        if (UBlueprint* Blueprint = Cast<UBlueprint>(Object->GetClass()->ClassGeneratedBy)) return Blueprint->GetPathName();
+        for (UObject* Owner = Object; Owner; Owner = Owner->GetOuter())
+            if (Owner->IsAsset()) return Owner->GetPathName();
+        return {};
+    }
+    // Plain package paths can describe newly created assets. A missing subobject
+    // is not an asset discovery mechanism and cannot be guessed from its prefix.
+    if (Path.Contains(TEXT(":"))) return {};
+    const FString Package = FPackageName::ObjectPathToPackageName(Path);
     if (!Package.StartsWith(TEXT("/")) || !FPackageName::IsValidLongPackageName(Package)) return {};
-    return Package + TEXT(".") + FPackageName::GetShortName(Package);
+    if (Path != Package && !FPackageName::IsValidObjectPath(Path)) return {};
+    return Path == Package ? Package + TEXT(".") + FPackageName::GetShortName(Package) : Path;
 }
 
 struct FExtracted
@@ -175,12 +189,11 @@ void Extract(const TSharedPtr<FJsonValue>& Value, const FString& ParentKey, FExt
             if (!Path.IsEmpty())
             {
                 Out.Assets.AddUnique(Path);
-                int32 LastDot = INDEX_NONE, Colon = INDEX_NONE;
-                Text.FindLastChar(TEXT(':'), Colon);
-                if (Out.Graph.IsEmpty() && Text.FindLastChar(TEXT('.'), LastDot) && LastDot > Colon)
-                    Out.Graph = Text.Left(LastDot);
-                const FString Leaf = Text.Mid(FMath::Max(Colon, LastDot) + 1);
-                if (!Leaf.IsEmpty()) Out.Nodes.AddUnique(Leaf);
+                if (const UEdGraphNode* Node = FindObject<UEdGraphNode>(nullptr, *Text))
+                {
+                    Out.Nodes.AddUnique(Node->NodeGuid.ToString());
+                    if (Out.Graph.IsEmpty() && Node->GetGraph()) Out.Graph = Node->GetGraph()->GetPathName();
+                }
             }
         }
         else if (ParentKey == TEXT("graph") || ParentKey == TEXT("graphname") || ParentKey == TEXT("graphid"))
@@ -281,7 +294,7 @@ namespace
 UEdGraph* ResolveGraph(const FDSHAssetViewHint& Hint)
 {
     if (Hint.Graph.IsEmpty()) return nullptr;
-    UBlueprint* Blueprint = Cast<UBlueprint>(LoadObject<UObject>(nullptr, *Hint.AssetPath));
+    UBlueprint* Blueprint = FindObject<UBlueprint>(nullptr, *Hint.AssetPath);
     if (!Blueprint) return nullptr;
     TArray<UEdGraph*> Graphs;
     Blueprint->GetAllGraphs(Graphs);
@@ -316,7 +329,12 @@ FString NodeText(UEdGraphNode* Node)
 FDSHMcpGraphSnapshot SnapshotGraph(UEdGraph* Graph)
 {
     FDSHMcpGraphSnapshot Snapshot;
-    if (const UBlueprint* Blueprint = Graph->GetTypedOuter<UBlueprint>()) Snapshot.AssetPath = Blueprint->GetPathName();
+    if (UBlueprint* Blueprint = Graph->GetTypedOuter<UBlueprint>())
+    {
+        Snapshot.AssetPath = Blueprint->GetPathName();
+        Snapshot.Owner = Blueprint;
+    }
+    Snapshot.Graph = Graph;
     Snapshot.GraphPath = Graph->GetPathName();
     Snapshot.GraphGuid = Graph->GraphGuid;
     for (UEdGraphNode* Node : Graph->Nodes)
@@ -370,7 +388,7 @@ TArray<FDSHMcpGraphSnapshot> FDSHMcpEditAdapter::CaptureCallGraphs(const FString
     // addressed Blueprints, then use semantic differences to select the targets.
     for (const FString& Path : Input.Assets)
     {
-        UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Path);
+        UBlueprint* Blueprint = FindObject<UBlueprint>(nullptr, *Path);
         TArray<UEdGraph*> Graphs;
         if (Blueprint) Blueprint->GetAllGraphs(Graphs);
         if (Graphs.IsEmpty())
@@ -379,6 +397,7 @@ TArray<FDSHMcpGraphSnapshot> FDSHMcpEditAdapter::CaptureCallGraphs(const FString
             // graphs yet, or the explicitly requested new asset does not exist.
             FDSHMcpGraphSnapshot Empty;
             Empty.AssetPath = Path;
+            Empty.Owner = Blueprint;
             Snapshots.Add(MoveTemp(Empty));
         }
         for (UEdGraph* Graph : Graphs) if (Graph) Snapshots.Add(SnapshotGraph(Graph));
@@ -391,6 +410,16 @@ TArray<FDSHAssetViewHint> FDSHMcpEditAdapter::FinalizeCall(const FString& ToolNa
     const TArray<FDSHMcpGraphSnapshot>& Before)
 {
     TArray<FDSHAssetViewHint> Hints = FromCall(ToolName, Arguments, Result);
+    Hints.RemoveAll([&Before](const FDSHAssetViewHint& Hint)
+    {
+        const FDSHMcpGraphSnapshot* Original = Before.FindByPredicate([&Hint](const FDSHMcpGraphSnapshot& Item) { return Item.AssetPath == Hint.AssetPath; });
+        if (Original && (Original->Owner.IsStale() || (Original->Owner.IsValid()
+            && FindObject<UBlueprint>(nullptr, *Hint.AssetPath) != Original->Owner.Get()))) return true;
+        const FDSHMcpGraphSnapshot* OriginalGraph = Before.FindByPredicate([&Hint](const FDSHMcpGraphSnapshot& Item)
+        { return Item.AssetPath == Hint.AssetPath && !Item.GraphPath.IsEmpty() && (Item.GraphPath == Hint.Graph || Item.GraphGuid.ToString() == Hint.Graph); });
+        return OriginalGraph && (OriginalGraph->Graph.IsStale()
+            || (!OriginalGraph->Graph.IsExplicitlyNull() && OriginalGraph->Graph.Get() != ResolveGraph(Hint)));
+    });
     if (!Succeeded(Result) || !IsGraphEdit(ToolName, Arguments)) return Hints;
     FExtracted Input, Output;
     ExtractCall(ToolName, Arguments, Result, Input, Output);
@@ -412,16 +441,28 @@ TArray<FDSHAssetViewHint> FDSHMcpEditAdapter::FinalizeCall(const FString& ToolNa
     TArray<FChangedGraph> Changed;
     for (const FString& Path : Assets)
     {
-        UBlueprint* Blueprint = LoadObject<UBlueprint>(nullptr, *Path);
+        const FDSHMcpGraphSnapshot* OwnerSnapshot = Before.FindByPredicate([&Path](const FDSHMcpGraphSnapshot& Item) { return Item.AssetPath == Path; });
+        UBlueprint* Blueprint = OwnerSnapshot ? OwnerSnapshot->Owner.Get() : nullptr;
+        if (Blueprint && Blueprint->GetPathName() != Path) continue;
         if (!Blueprint) continue;
         TArray<UEdGraph*> Graphs;
         Blueprint->GetAllGraphs(Graphs);
         for (UEdGraph* Graph : Graphs)
         {
             if (!Graph) continue;
+            const FDSHMcpGraphSnapshot* PriorIdentity = Before.FindByPredicate([Graph, Blueprint](const FDSHMcpGraphSnapshot& Item)
+            { return Item.Owner.Get() == Blueprint && !Item.GraphPath.IsEmpty() && (Item.GraphPath == Graph->GetPathName()
+                || (Item.GraphGuid.IsValid() && Item.GraphGuid == Graph->GraphGuid)); });
+            if (PriorIdentity && !PriorIdentity->Graph.IsExplicitlyNull() && PriorIdentity->Graph.Get() != Graph)
+            {
+                Warnings.Add(MakeShared<FJsonValueString>(Graph->GetPathName()
+                    + TEXT(": Automatic layout was skipped because the original graph identity expired or was replaced.")));
+                continue;
+            }
             const FDSHMcpGraphSnapshot* Snapshot = Before.FindByPredicate([Graph, Blueprint](const FDSHMcpGraphSnapshot& Item)
             {
-                return Item.AssetPath == Blueprint->GetPathName() && (Item.GraphPath == Graph->GetPathName()
+                return Item.Owner.Get() == Blueprint && Item.Graph.Get() == Graph
+                    && Item.AssetPath == Blueprint->GetPathName() && (Item.GraphPath == Graph->GetPathName()
                     || (Item.GraphGuid.IsValid() && Item.GraphGuid == Graph->GraphGuid));
             });
             FChangedGraph Change;
@@ -567,7 +608,7 @@ void FDSHMcpEditAdapter::IncludeGraphChanges(TArray<FDSHAssetViewHint>& Hints,
         UEdGraph* Graph = ResolveGraph(Hint);
         if (!Graph) continue;
         const FDSHMcpGraphSnapshot* Snapshot = Before.FindByPredicate(
-            [Graph](const FDSHMcpGraphSnapshot& Item) { return Item.GraphPath == Graph->GetPathName(); });
+            [Graph](const FDSHMcpGraphSnapshot& Item) { return Item.Graph.Get() == Graph && Item.GraphPath == Graph->GetPathName(); });
         if (!Snapshot) continue;
         TSet<FString> Remaining;
         for (UEdGraphNode* Node : Graph->Nodes)

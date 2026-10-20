@@ -15,7 +15,7 @@ async function fixture(t,config={}){
   t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
   return bridge;
 }
-async function editor(bridge,handler,capabilities=['mcp_tools','data_table_copy_property']){
+async function editor(bridge,handler,capabilities=['mcp_tools','mcp_target_validation','data_table_copy_property']){
   const calls=[];
   const socket=new WebSocket(bridge.descriptor.url,{headers:{Authorization:`Bearer ${bridge.token}`}});
   await once(socket,'open');const ack=once(socket,'message');
@@ -32,14 +32,14 @@ const copy=()=>({assetPath:'/Game/DT_Test',sourceRow:'Predestrian',propertyName:
 const copied={verified:true,targetCount:45,changedRows:45,unchangedRows:0,saved:false};
 
 test('unsafe DataTable and desktop MCP routes are rejected before dispatch',async t=>{
-  const bridge=await fixture(t);const calls=await editor(bridge,()=>({ok:true,result:{}}));
+  const bridge=await fixture(t);const calls=await editor(bridge,message=>({ok:true,result:message.method==='mcp_discover'?{content:[{type:'text',text:JSON.stringify({tools:[{name:'DataTableTools.get_rows',inputSchema:{type:'object',properties:{}}}]})}]}:{}}));
   for(const [toolsetName,toolName] of [['DataTableTools','set_rows'],['DataTableTools','add_rows'],['DataTableTools','rename_rows'],['SlateInspectorToolset','Click'],['ProgrammaticToolset','execute_tool_script']]){
     await assert.rejects(bridge.mcpCallToolset('chat',{toolsetName,toolName,arguments:{},requestId:randomUUID()}),{code:'MCP_POLICY_BLOCKED'});
   }
   await assert.rejects(bridge.mcpCall('chat',{name:'editor_toolset.toolsets.data_table.DataTableTools.set_rows',arguments:{},requestId:randomUUID()}),{code:'MCP_POLICY_BLOCKED'});
   assert.equal(calls.length,0);
   assert.deepEqual(await bridge.mcpCallToolset('chat',{toolsetName:'DataTableTools',toolName:'get_rows',arguments:{},requestId:randomUUID()}),{});
-  assert.equal(calls.length,1);
+  assert.equal(calls.filter(call=>call.method==='mcp_call_tool').length,1);
 });
 
 test('native copy dispatch is atomic, idempotent and does not request save or focus',async t=>{
@@ -77,10 +77,37 @@ test('unverified results and failed rollbacks lock editor writes across chats an
 });
 
 test('inner MCP failure is surfaced as unverified rather than reported as success',async t=>{
-  const bridge=await fixture(t);const calls=await editor(bridge,()=>({ok:true,result:{isError:true,content:[{type:'text',text:'Import failed'}]}}));
+  const bridge=await fixture(t);const calls=await editor(bridge,message=>({ok:true,result:message.method==='mcp_discover'?{content:[{type:'text',text:JSON.stringify({tools:[{name:'ObjectTools.set_properties',inputSchema:{type:'object',properties:{}}}]})}]}:{isError:true,content:[{type:'text',text:'Import failed'}]}}));
   const args={toolsetName:'ObjectTools',toolName:'set_properties',arguments:{},requestId:randomUUID()};
-  for(let i=0;i<2;i++)await assert.rejects(bridge.mcpCallToolset('chat',args),error=>error.code==='MCP_TOOL_ERROR'&&error.details.rollback==='not_available');
-  assert.equal(calls.length,1);
+  for(let i=0;i<2;i++)await assert.rejects(bridge.mcpCallToolset('chat',args),error=>error.code==='MCP_TOOL_ERROR'&&error.details.rollback==='not_available'&&error.details.retryable===true&&error.details.recovery==='verify_before_retry'&&error.message==='Import failed'&&error.details.ueResult.content[0].text==='Import failed');
+  assert.equal(calls.filter(call=>call.method==='mcp_call_tool').length,1);
+});
+
+test('an inner MCP rollback failure locks editor writes in every conversation',async t=>{
+  const bridge=await fixture(t);
+  const failure={ok:false,error:{code:'EDITOR_ERROR',message:'The original array could not be restored',details:{rollback:'failed'}}};
+  const calls=await editor(bridge,message=>({ok:true,result:message.method==='mcp_discover'?{
+    content:[{type:'text',text:JSON.stringify({tools:[{name:'ObjectTools.set_properties',inputSchema:{type:'object',properties:{}}}]})}],
+  }:failure}));
+  const args={toolsetName:'ObjectTools',toolName:'set_properties',arguments:{},requestId:randomUUID()};
+  await assert.rejects(bridge.mcpCallToolset('chat',args),error=>{
+    assert.equal(error.code,'MCP_TOOL_ERROR');
+    assert.equal(error.details.rollback,'failed');
+    assert.equal(error.details.retryable,false);
+    assert.equal(error.details.recovery,'stop_writes');
+    assert.deepEqual(error.details.ueResult,failure);
+    return true;
+  });
+  assert.equal(bridge.state('chat').writeLock.rollback,'failed');
+  assert.equal(bridge.state('chat').writeLock.requestId,args.requestId);
+  const admittedCalls=calls.length;
+  bridge.bind('other-chat','editor');
+  assert.equal(bridge.state('other-chat').writeLock.rollback,'failed');
+  await assert.rejects(bridge.copyDataTableProperty('other-chat',copy()),{code:'EDITOR_WRITE_LOCKED'});
+  await assert.rejects(bridge.mcpCallToolset('chat',{...args,requestId:randomUUID()}),{code:'EDITOR_WRITE_LOCKED'});
+  await assert.rejects(bridge.mcpCallToolset('other-chat',{...args,requestId:randomUUID()}),{code:'EDITOR_WRITE_LOCKED'});
+  assert.equal(calls.length,admittedCalls,'locked writes must not reach the editor');
+  assert.equal(calls.filter(call=>call.method==='mcp_call_tool').length,1);
 });
 
 test('a failed rollback recovered after timeout still locks writes and preserves the failure',async t=>{
@@ -97,17 +124,21 @@ test('a failed rollback recovered after timeout still locks writes and preserves
   assert.equal(calls.length,2);
 });
 
-test('plugin wrapper cancels the owning turn on a blocked route before any editor write',async t=>{
+test('plugin wrapper rejects a blocked route but permits its safe native alternative in the same turn',async t=>{
   const tools=new Map(),services=new Map(),cancellations=[];
   const stateDir=await mkdtemp(join(tmpdir(),'dsh-write-guard-plugin-'));
   const ctx={tools:{register:tool=>tools.set(tool.name,tool)},systemPrompt:{section(){}},typert:{register(){}},provide:(name,value)=>services.set(name,value),get:()=>undefined,effect:()=>{}};
   await apply(ctx,{port:0,stateDir,requireApproval:false});
   const bridge=services.get('unrealBridge').bridge;
   t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
-  const calls=await editor(bridge,()=>({ok:true,result:{}}));
+  const calls=await editor(bridge,()=>({ok:true,result:copied}));
   const exec={agent:{session:{id:'chat'},cancel:(...args)=>cancellations.push(args)},name:'unreal_mcp_call_toolset',callId:'first',signal:new AbortController().signal};
   const blocked=await tools.get(exec.name).execute({toolsetName:'DataTableTools',toolName:'set_rows',requestId:randomUUID()},exec);
-  assert.equal(blocked.ok,false);assert.equal(blocked.error.code,'MCP_POLICY_BLOCKED');assert.equal(cancellations.length,1);
+  assert.equal(blocked.ok,false);assert.equal(blocked.error.code,'MCP_POLICY_BLOCKED');assert.equal(cancellations.length,0);
+  assert.equal(blocked.error.details.retryable,false);assert.equal(calls.length,0);
   const next=await tools.get('unreal_data_table_copy_property').execute(copy(),{...exec,name:'unreal_data_table_copy_property',callId:'second'});
-  assert.equal(next.ok,false);assert.equal(next.error.code,'EXECUTION_HALTED');assert.equal(calls.length,0);
+  assert.equal(next.ok,true);assert.equal(next.verified,true);assert.equal(calls.length,1);
+  assert.equal(calls[0].method,'data_table_copy_property');assert.equal(cancellations.length,0);
+  const state=await tools.get('unreal_state').execute({},{...exec,name:'unreal_state',callId:'state'});
+  assert.equal(state.executionSafety.errors,1);assert.equal(state.executionSafety.halted,false);
 });

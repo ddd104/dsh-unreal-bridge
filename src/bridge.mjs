@@ -7,6 +7,8 @@ import { homedir } from 'node:os';
 import { WebSocketServer, WebSocket } from 'ws';
 import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, focusSchema, catalogSchema, knowledgeSchema, knowledgeRecordSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, dataTableCopySchema, runtimeChangedSchema, runtimeSnapshotSchema, runtimeSnapshotResultSchema, runtimeHistorySchema, fail, BridgeError } from './protocol.mjs';
 import { assertSafeMcpCall } from './mcp-policy.mjs';
+import {levelBlueprintSchema} from './protocol.mjs';
+import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure} from './mcp-contract.mjs';
 
 export function defaultStateDir() {
   return process.platform==='win32' ? join(process.env.LOCALAPPDATA ?? join(homedir(),'AppData','Local'),'DSHUnrealBridge') : join(process.env.XDG_STATE_HOME ?? join(homedir(),'.local','state'),'dsh-unreal-bridge');
@@ -88,7 +90,7 @@ export class UnrealBridge extends EventEmitter {
   }
   changed(){this.eventVersion++;this.emit('change');}
   list(){return [...this.editors.values()].map(({editorId,project,projectPath,engineVersion,pid,capabilities})=>({editorId,project,projectPath,engineVersion,pid,capabilities}));}
-  state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:e?.selection??[],runtime:e?.runtime??null,runtimeSnapshots:this.runtimeHistory(sessionId).snapshots,allowWrites:this.config.allowWrites,requireApproval:this.config.requireApproval,uncertain:this.uncertain.get(sessionId)??null,writeLock:this.writeLocks.get(editorId)??null};}
+  state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:e?.selection??[],runtime:e?.runtime??null,runtimeSnapshots:this.runtimeHistory(sessionId).snapshots,blueprintSupport:{normalBlueprints:e?.capabilities.includes('read_blueprint')??false,levelBlueprintLookup:e?.capabilities.includes('level_blueprint_lookup')??false,levelBlueprintNativePatch:false},toolSafety:{argumentSchemaValidation:true,nativeTargetValidation:e?.capabilities.includes('mcp_target_validation')??false,safePresentation:e?.capabilities.includes('safe_asset_presentation')??false},allowWrites:this.config.allowWrites,requireApproval:this.config.requireApproval,uncertain:this.uncertain.get(sessionId)??null,writeLock:this.writeLocks.get(editorId)??null};}
   bind(sessionId,editorId){if(editorId!==null&&!this.editors.has(editorId))fail('INSTANCE_NOT_FOUND','Editor is not connected'); if(this.inflight.has(sessionId))fail('BUSY','A request is still executing for this conversation');editorId===null?this.sessions.delete(sessionId):this.sessions.set(sessionId,editorId);this.bindingVersions.set(sessionId,(this.bindingVersions.get(sessionId)??0)+1);this.changed();return this.state(sessionId);}
   target(sessionId){const editorId=this.sessions.get(sessionId);if(!editorId)fail('NOT_BOUND','Select an Unreal Editor instance for this conversation first');const editor=this.editors.get(editorId);if(!editor)fail('DISCONNECTED','The bound editor is offline; reconnect it or choose another instance');return editor;}
   mcpTarget(sessionId){const editor=this.target(sessionId);if(!editor.capabilities.includes('mcp_tools'))fail('MCP_UNAVAILABLE','This editor does not expose UE MCP tools; enable ModelContextProtocol and update DSHUnrealBridge');return editor;}
@@ -106,6 +108,15 @@ export class UnrealBridge extends EventEmitter {
     });
   }
   async read(sessionId,args,signal){return this.request(this.target(sessionId),'read_blueprint',readSchema.parse(args),{signal});}
+  async levelBlueprint(sessionId,args,signal){
+    const params=levelBlueprintSchema.parse(args),editor=this.target(sessionId);
+    if(!editor.capabilities.includes('level_blueprint_lookup'))fail('LEVEL_BLUEPRINT_LOOKUP_UNAVAILABLE','Update the editor bridge to resolve level Blueprints. Finish supported work and report this missing capability; do not guess subobject paths or search bridge source',{execution:'not_started',retryable:false,recommendedTool:'unreal_level_blueprint'});
+    const binding=this.bindingVersions.get(sessionId)??0;
+    const result=await this.request(editor,'resolve_level_blueprint',params,{signal});
+    if(this.target(sessionId)!==editor||(this.bindingVersions.get(sessionId)??0)!==binding)fail('INSTANCE_CHANGED','The editor binding changed while resolving the level Blueprint; read the current target again',{execution:'not_started',retryable:true});
+    if(typeof result?.mapPath!=='string'||result.mapPath.split('.')[0]!==params.mapPath.split('.')[0]||typeof result?.blueprint?.refPath!=='string'||!result.blueprint.refPath.startsWith(`${result.mapPath}:`))fail('INVALID_LEVEL_BLUEPRINT_RESULT','The editor returned a Blueprint outside the requested map; do not use this reference',{mapPath:params.mapPath});
+    return result;
+  }
   runtimeUnavailable(editor,target){
     const invalid=editor.invalidRuntimeTargets.get(runtimeKey(target));
     if(invalid)return invalid;
@@ -178,7 +189,7 @@ export class UnrealBridge extends EventEmitter {
     this.runtimeSnapshots.set(sessionId,records);this.changed();
     return this.runtimeHistory(sessionId,{snapshotId:snapshot.snapshotId});
   }
-  async focus(sessionId,args,signal){const editor=this.target(sessionId);if(!editor.capabilities.includes('focus_asset'))fail('FOCUS_UNAVAILABLE','This editor does not support asset presentation');return this.request(editor,'focus_asset',focusSchema.parse(args),{signal});}
+  async focus(sessionId,args,signal){const editor=this.target(sessionId);if(!editor.capabilities.includes('focus_asset'))fail('FOCUS_UNAVAILABLE','This editor does not support asset presentation');if(!editor.capabilities.includes('safe_asset_presentation'))fail('FOCUS_SAFETY_UNAVAILABLE','Update and restart the UE bridge plugin before focusing assets: this editor does not verify presentation targets',{execution:'not_started',retryable:true});return this.request(editor,'focus_asset',focusSchema.parse(args),{signal});}
   async catalog(sessionId,args={}){return this.request(this.target(sessionId),'catalog',catalogSchema.parse(args));}
   async knowledge(sessionId,args,signal){const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.request(editor,'knowledge_call',knowledgeSchema.parse(args),{signal,timeoutMs:120000});}
   async knowledgeRecord(sessionId,args,signal){const {tool,arguments:toolArgs,requestId}=knowledgeRecordSchema.parse(args);const editor=this.target(sessionId);if(!editor.capabilities.includes('project_knowledge'))fail('KNOWLEDGE_UNAVAILABLE','This editor does not expose project knowledge tools');return this.mutate(sessionId,'knowledge_call',{tool,arguments:toolArgs},requestId,signal);}
@@ -187,16 +198,50 @@ export class UnrealBridge extends EventEmitter {
   async mcpDescribe(sessionId,args,signal){
     const {toolsetName,query,includeSchema}=mcpDescribeSchema.parse(args);
     const result=await this.request(this.mcpTarget(sessionId),'mcp_discover',{name:'describe_toolset',arguments:{toolset_name:toolsetName}},{signal});
-    if(!query&&includeSchema)return result;
-    const block=result?.content?.find(item=>item.type==='text');
-    let description;
-    try{description=JSON.parse(block?.text);}catch{fail('MCP_DESCRIPTION_UNPARSEABLE','Editor returned a toolset description that cannot be filtered');}
-    if(!Array.isArray(description?.tools))fail('MCP_DESCRIPTION_UNPARSEABLE','Editor returned a toolset description without tools');
-    const found=description.tools.filter(tool=>!query||tool.name?.toLowerCase().includes(query.toLowerCase()));
-    const tools=includeSchema?found:found.map(tool=>({name:tool.name,description:tool.description?.split('\n')[0]?.slice(0,180)??''}));
+    const {block,description}=describeTools(result,toolsetName);
+    const found=description.tools.filter(tool=>!query||tool.fullName.toLowerCase().includes(query.toLowerCase()));
+    const tools=includeSchema?found:found.map(({name,fullName,toolsetName,description})=>({name,fullName,toolsetName,description:description?.split('\n')[0]?.slice(0,180)??''}));
     return {...result,content:result.content.map(item=>item===block?{...item,text:JSON.stringify({...description,tools})}:item)};
   }
-  async mcpCall(sessionId,args,signal){const {name,arguments:toolArgs,requestId}=mcpCallSchema.parse(args);this.mcpTarget(sessionId);assertSafeMcpCall({name,arguments:toolArgs},{allowDesktopInput:this.config.allowMcpDesktopInput===true});return this.mutate(sessionId,'mcp_call_tool',{name,arguments:toolArgs},requestId,signal);}
+  async mcpCall(sessionId,args,signal){
+    const {name,arguments:toolArgs,requestId}=mcpCallSchema.parse(args),editor=this.mcpTarget(sessionId),bindingVersion=this.bindingVersions.get(sessionId);
+    let call={name,arguments:toolArgs};
+    assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput===true});
+    let toolsetName,toolName;
+    if(name.toLowerCase()==='call_tool'){
+      toolsetName=toolArgs.toolset_name??'';
+      const parsed=(toolsetName?mcpToolsetCallSchema:mcpCallSchema).safeParse(toolsetName?{toolsetName,toolName:toolArgs.tool_name,arguments:toolArgs.arguments,requestId}:{name:toolArgs.tool_name,arguments:toolArgs.arguments,requestId});
+      if(!parsed.success||Object.keys(toolArgs).some(key=>!['toolset_name','tool_name','arguments'].includes(key)))fail('MCP_INVALID_ARGUMENTS','Use toolset_name, tool_name and arguments from the discovered tool schema',{execution:'not_started',retryable:true,issues:parsed.error?.issues??[]});
+      if(toolsetName){
+        toolName=shortToolName(toolsetName,parsed.data.toolName);
+        call={name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:parsed.data.arguments}};
+      }else{
+        if(parsed.data.name.toLowerCase()==='call_tool')fail('MCP_INVALID_TOOL_NAME','call_tool cannot dispatch to itself',{execution:'not_started',retryable:true});
+        call={name:parsed.data.name,arguments:parsed.data.arguments};
+      }
+    }
+    // Normalization can expose a nested dispatcher hidden by its full prefix.
+    assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput===true});
+    if((toolName??call.name).split('.').at(-1).toLowerCase()==='call_tool'&&toolName)fail('MCP_TARGET_UNSUPPORTED','Nested MCP dispatchers cannot verify their final target; call the discovered leaf tool directly',{execution:'not_started',retryable:true});
+    // Cached outcomes and existing write barriers take precedence over discovery.
+    // A preflight failure has no cached outcome, so its arguments can be corrected.
+    const priorKey=`${editor.editorId}:${sessionId}:${requestId}`;
+    if(this.results.has(priorKey)||!this.config.allowWrites||this.writeLocks.has(editor.editorId)||this.uncertain.has(sessionId)||this.inflight.has(sessionId))return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal);
+    let tool;
+    if(toolsetName){
+      const result=await this.mcpDescribe(sessionId,{toolsetName,query:toolName},signal);
+      tool=JSON.parse(result.content.find(item=>item.type==='text').text).tools.find(item=>item.name===toolName);
+    }else{
+      const catalog=await this.mcpTools(sessionId,signal);
+      if(catalog?.isError===true||catalog?.ok===false)throw mcpFailure(catalog,requestId,true);
+      tool=catalog?.tools?.find(item=>item.name===call.name);
+    }
+    if(!tool)fail('MCP_TOOL_NOT_FOUND','This tool is not in the bound editor catalog; use unreal_mcp_describe or unreal_mcp_tools to choose an exact name',{execution:'not_started',retryable:true,...(toolsetName?{toolsetName}:{}),toolName:toolName??call.name});
+    validateMcpArguments(tool,toolsetName?call.arguments.arguments:call.arguments);
+    if(this.mcpTarget(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','The editor binding changed during MCP argument validation; read its current schema before retrying',{execution:'not_started',retryable:true});
+    if(!editor.capabilities.includes('mcp_target_validation'))fail('MCP_TARGET_VALIDATION_UNAVAILABLE','Update and restart the UE bridge plugin before executing MCP tools: this editor cannot verify target object types and ownership before dispatch',{execution:'not_started',retryable:true,requiredCapability:'mcp_target_validation'});
+    return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal,{mcpReadOnly:isReadOnlyMcpCall(call)});
+  }
   async mcpCallToolset(sessionId,args,signal){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal);}
   async copyDataTableProperty(sessionId,args,signal){const {requestId,...params}=dataTableCopySchema.parse(args);if(!this.target(sessionId).capabilities.includes('data_table_copy_property'))fail('DATA_TABLE_COPY_UNAVAILABLE','Update the UE bridge plugin to copy DataTable properties safely; do not fall back to set_rows or desktop input',{retryable:false});return this.mutate(sessionId,'data_table_copy_property',params,requestId,signal);}
   invalidate(editorId,asset){for(const [key,p] of this.previews) if(p.editorId===editorId&&(!asset||p.params.assetPath.split('.')[0]===asset.split('.')[0]))this.previews.delete(key);}
@@ -210,7 +255,7 @@ export class UnrealBridge extends EventEmitter {
   }
   previewRecord(sessionId,previewId){const p=this.previews.get(previewId);if(!p||p.sessionId!==sessionId||p.expires<Date.now())fail('PREVIEW_EXPIRED','Preview missing, changed, or expired; read and preview again');if(this.target(sessionId).editorId!==p.editorId)fail('INSTANCE_CHANGED','Conversation is bound to another editor');return p;}
   async audit(row){const path=join(this.config.stateDir,'audit.jsonl');this.auditChain=this.auditChain.catch(()=>{}).then(async()=>{try{if((await stat(path)).size>10*1024*1024)await rename(path,join(this.config.stateDir,`audit-${Date.now()}.jsonl`));}catch(e){if(e.code!=='ENOENT')throw e;}await appendFile(path,JSON.stringify({time:new Date().toISOString(),...row})+'\n',{mode:0o600});});return this.auditChain;}
-  async mutate(sessionId,method,params,requestId,signal){
+  async mutate(sessionId,method,params,requestId,signal,options={}){
     if(!this.config.allowWrites)fail('READ_ONLY','Writes are disabled in the bridge configuration');
     const editor=this.target(sessionId); const key=`${editor.editorId}:${sessionId}:${requestId}`; const hash=digest({method,params});
     const prior=this.results.get(key);if(prior){if(prior.hash!==hash)fail('IDEMPOTENCY_MISMATCH','Request ID was used for different parameters');if(prior.error)throw prior.error;return prior.result;}
@@ -221,16 +266,19 @@ export class UnrealBridge extends EventEmitter {
     try {
       await this.audit({phase:'requested',sessionId,editorId:editor.editorId,requestId,method,assetPath:params.assetPath,toolName:params.name,paramsHash:hash});
       const result=await this.request(editor,method,params,{id:requestId,signal});
-      if(method==='mcp_call_tool'&&(result?.isError===true||result?.ok===false))fail('MCP_TOOL_ERROR','The UE MCP tool reported failure. Its asset changes are unverified; stop this task instead of attempting UI repair',{retryable:false,rollback:'not_available',requestId});
+      if(method==='mcp_call_tool'&&(result?.isError===true||result?.ok===false))throw mcpFailure(result,requestId,options.mcpReadOnly===true);
       if(method==='data_table_copy_property'&&result?.verified!==true)fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
       this.results.set(key,{hash,result}); if(this.results.size>1000)this.results.delete(this.results.keys().next().value);
       await this.audit({phase:'completed',sessionId,editorId:editor.editorId,requestId,method,revision:result?.revision}).catch(e=>this.emit('diagnostic',`Audit completion failed: ${e.message}`));
       return result;
     }catch(e){
       if(e.details?.rollback==='failed'||e.code==='DATA_TABLE_ROLLBACK_FAILED')this.writeLocks.set(editor.editorId,{requestId,method,assetPath:params.assetPath,code:e.code,rollback:'failed',retryable:false});
-      if(!['TIMEOUT','CANCELLED','DISCONNECTED'].includes(e.code)){this.results.set(key,{hash,error:e});if(this.results.size>1000)this.results.delete(this.results.keys().next().value);}
-      if(['TIMEOUT','CANCELLED','DISCONNECTED'].includes(e.code)){this.uncertain.set(sessionId,{editorId:editor.editorId,requestId,method,assetPath:params.assetPath});this.results.set(key,{hash,error:e});}
-      await this.audit({phase:'failed',sessionId,editorId:editor.editorId,requestId,method,code:e.code??'ERROR',rollback:e.details?.rollback,writeLocked:this.writeLocks.has(editor.editorId)}).catch(()=>{});throw e;
+      // Native target rejection happens before its execution journal is admitted.
+      // Preserve the opportunity to correct parameters under the same request ID.
+      const targetPreflight=method==='mcp_call_tool'&&e.code?.startsWith('MCP_TARGET_')&&e.details?.execution==='not_started';
+      if(!targetPreflight&&!['TIMEOUT','CANCELLED','DISCONNECTED'].includes(e.code)){this.results.set(key,{hash,error:e});if(this.results.size>1000)this.results.delete(this.results.keys().next().value);}
+      if(['TIMEOUT','CANCELLED','DISCONNECTED'].includes(e.code)){if(!options.mcpReadOnly)this.uncertain.set(sessionId,{editorId:editor.editorId,requestId,method,assetPath:params.assetPath});this.results.set(key,{hash,error:e});}
+      await this.audit({phase:'failed',sessionId,editorId:editor.editorId,requestId,method,code:e.code??'ERROR',message:e.message,rollback:e.details?.rollback,writeLocked:this.writeLocks.has(editor.editorId)}).catch(()=>{});throw e;
     }finally{this.inflight.delete(sessionId);this.changed();}
   }
   async apply(sessionId,previewId,requestId,signal){const p=this.previewRecord(sessionId,previewId);return this.mutate(sessionId,p.kind==='patch'?'apply_patch':'create_blueprint',p.params,requestId,signal);}
@@ -239,7 +287,7 @@ export class UnrealBridge extends EventEmitter {
     if(u?.requestId===requestId&&u.editorId===editor.editorId&&result.status==='completed'){
       let error=result.response.ok?null:new BridgeError(result.response.error.code,result.response.error.message,result.response.error.details);
       if(!error&&u.method==='data_table_copy_property'&&result.response.result?.verified!==true)error=new BridgeError('DATA_TABLE_ROLLBACK_FAILED','The recovered copy result is unverified',{rollback:'failed',retryable:false,requestId});
-      if(!error&&u.method==='mcp_call_tool'&&(result.response.result?.isError===true||result.response.result?.ok===false))error=new BridgeError('MCP_TOOL_ERROR','The recovered MCP request failed; its asset changes remain unverified',{rollback:'not_available',retryable:false,requestId});
+      if(!error&&u.method==='mcp_call_tool'&&(result.response.result?.isError===true||result.response.result?.ok===false))error=mcpFailure(result.response.result,requestId);
       if(error?.details?.rollback==='failed'||error?.code==='DATA_TABLE_ROLLBACK_FAILED')this.writeLocks.set(editor.editorId,{...u,code:error.code,rollback:'failed',retryable:false});
       this.uncertain.delete(sessionId);
       const key=`${editor.editorId}:${sessionId}:${requestId}`,old=this.results.get(key);

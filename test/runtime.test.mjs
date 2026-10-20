@@ -221,7 +221,7 @@ test('runtime tools are registered as approval-free reads and history works offl
   await apply(ctx,{stateDir,port:0,allowWrites:false,requireApproval:true});const bridge=services.get('unrealBridge').bridge;
   t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
   const peer=await connect(bridge);await live(bridge,peer);const exec={agent:{session:{id:'chat'}},signal:new AbortController().signal};
-  assert.equal(tools.size,23);assert.equal(tools.get('unreal_runtime_snapshot').isConcurrencySafe(),true);assert.equal(tools.get('unreal_runtime_history').isConcurrencySafe(),true);
+  assert.equal(tools.size,24);assert.equal(tools.get('unreal_runtime_snapshot').isConcurrencySafe(),true);assert.equal(tools.get('unreal_runtime_history').isConcurrencySafe(),true);
   const result=await tools.get('unreal_runtime_snapshot').execute({},exec);assert.equal(result.ok,true);assert.equal(approvals,0);
   const closed=once(bridge.editors.get('UE1').ws,'close');peer.ws.close();await closed;
   const history=await tools.get('unreal_runtime_history').execute({snapshotId:result.snapshotId},exec);assert.equal(history.ok,true);assert.equal(history.status,'disconnected');

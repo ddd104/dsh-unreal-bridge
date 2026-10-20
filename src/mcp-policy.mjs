@@ -69,6 +69,9 @@ export function assertSafeMcpCall(call, options = {}) {
     if (!DISPATCHERS.has(compact(name))) return;
     const toolsets = fieldValues(args, 'toolsetname');
     const tools = fieldValues(args, 'toolname');
+    // UE's native call_tool also dispatches top-level tools when this optional
+    // field is omitted. Other wrapper spellings still require an exact target.
+    if (compact(name) === 'calltool' && toolsets.length === 0) toolsets.push('');
     // unreal_mcp_call carries a nested {name, arguments}; call_tool carries
     // {toolset_name, tool_name, arguments}. Do not silently overlook an alias
     // or conflicting duplicate casing of either dispatch field.

@@ -1,4 +1,4 @@
-# DSH Unreal Bridge 0.4.0
+# DSH Unreal Bridge 0.4.4
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 资产、关卡 Actor 或组件选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
@@ -32,9 +32,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Project 'F:\UE5P
 
 对其他资产提出查询、创建、修改或删除要求时，DSH 先列出 UE 5.8 MCP 工具集、读取目标工具的参数说明，再直接调用已绑定编辑器里的工具。无需生成 Python、Shell 或 Editor Utility 脚本。实际可用操作取决于工程启用的 UE 工具集；本机 EHV 已启用 `ModelContextProtocol` 与 `AllToolsets`。脚本执行型 MCP 工具在桥接层被拒绝。
 
+工具描述同时提供短名 `name`、完整名 `fullName` 和 `toolsetName`；调用可使用短名或该工具集的完整名，桥接统一转换，避免重复拼接。每次调用还会从同一编辑器取得精确参数 schema，在发送执行请求前检查参数；字段名、类型和对象引用必须按 schema 填写，例如 DataTable 的 `data_table: {refPath: "/Game/Data/DT_Obstcale_EHV1.DT_Obstcale_EHV1"}`，不能猜成 `dataTablePath`。MCP 的资产 `refPath` 使用带 `.对象名` 的完整对象路径，裸包路径可能无法解析。参数预检失败可按提示修正，不执行工具。示例中的资产路径需替换为工程内实际路径。宿主负责参数形状校验；0.4.4 的真实对象类型预检和安全展示还需同步更新编译后的 UE 插件。
+
+修改 `Map_SR` 等关卡蓝图时，先用只读 `unreal_level_blueprint({mapPath: "/Game/Maps/Map_SR"})` 取得真实的关卡蓝图 `blueprint.refPath`、图引用和保存地图目标，再将这些引用交给已发现的 MCP 图工具。原生 `unreal_read_blueprint` 和补丁仍只支持普通蓝图；关卡蓝图的 MCP 操作不获得原生补丁的事务与回滚保证。此查询需要 UE 新能力 `level_blueprint_lookup`，须安装编译后的 UE 插件并重启编辑器，同时更新 DSH 宿主。旧 UE 明确返回 `LEVEL_BLUEPRINT_LOOKUP_UNAVAILABLE`；此时应更新插件，不搜索桥接源码或尝试脚本绕路。
+
 关卡选区包含对象类型、名称、显示名、实例路径、世界路径，以及可用的类蓝图路径；组件还包含所属 Actor。实例属性操作使用实例路径；修改类蓝图逻辑使用蓝图资产路径。原生 Actor 或组件可能没有类蓝图。关卡选区同步需要 UE 插件声明 `level_selection` 能力，并配套更新 DSH 插件。
 
 Actor 蓝图编辑器内的组件显示为“蓝图组件”，同步组件模板路径、变量名、所属 Actor 蓝图及继承标记，不附加关卡实例路径。点击蓝图树中的 Actor 根项时显示蓝图资产；关闭当前蓝图后清空其选区。该功能需要 `blueprint_component_selection` 能力，并配套更新 DSH 插件。
+
+## 工具执行前后校验
+
+0.4.4 为 MCP 执行增加统一预检：宿主校验当前参数定义和编辑器绑定，UE 在真正派发前重新读取注册工具的类型定义，核验真实对象类型、类继承、图/节点归属与引脚身份。路径看起来像蓝图并不足以通过，关卡蓝图子对象路径必须原样保留。无法证明兼容的引用返回 `MCP_TARGET_*` 与“尚未执行”，允许纠正后继续；旧编辑器缺少 `mcp_target_validation` 能力时拒绝执行，避免绕过保护。
+
+自动布局和展示也校验原对象身份。展示只使用已加载的蓝图、材质及材质函数；不把关卡蓝图降级为 World，不打开或重载地图，同一展示最多打开一次编辑器。关卡蓝图必须属于当前编辑世界或已加载的流送关卡；对象失效或发生替换时跳过后处理。手动定位也需要安全展示能力，支持真实的关卡蓝图/图/节点子对象路径。
+
+`unreal_state.toolSafety` 显示这些能力。预检不执行工具试探、不导入属性、不加载资产；也不代表已经验证任意工具的全部内部逻辑。DataTable 的有损写入仍由专门策略拦截，写入结果、编译和保存仍需分别验证。更新后重启 DSH 和 UE，才能加载两端保护。
 
 ## PIE 运行实例诊断
 
@@ -85,7 +97,8 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 | PIE 实例诊断 | 同步运行 Actor/组件、运行/暂停状态和世界身份；按需采集反射属性快照，目标失效后保留带时间和状态的历史 |
 | UE 5.8 MCP 工具 | 独立 `DSHUnrealBridgeMCP` 模块直接访问当前编辑器注册的工具；支持发现工具集、读取 schema 和按名调用 |
 | DataTable 字段复制 | 原生批量深复制指定字段，内存快照校验源行及其他字段，失败回滚；不经过整表 JSON/TSV，不保存或操作窗口 |
-| 执行熔断 | UE 任务激活后限制本轮全部工具、模型步数、累计错误及耗时；达到阈值由宿主取消本轮，阻止换工具或脚本继续修补 |
+| 执行预算与收尾 | UE 任务激活后限制工具、模型步数、错误及耗时；工具错误反馈模型纠正，预算耗尽或编辑器写锁进入状态查询与总结，总耗时超限立即中止 |
+| 关卡蓝图定位 | 只读查询地图内实际关卡蓝图及图引用，供 MCP 图工具继续操作；需要 `level_blueprint_lookup` 能力 |
 | 项目知识 | 同插件的 `DSHUnrealBridgeKnowledge` 编辑器模块提供源码、资料、图谱与分页资产快照查询；缓存有项目身份和新鲜度校验 |
 | 读取与 Token 控制 | 默认返回图摘要；可按图、节点编号读取节点/引脚/连接 |
 | 函数目录 | 搜索已加载的原生 BlueprintCallable / BlueprintEvent 函数及其引脚 |
@@ -122,13 +135,17 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 ### 写入保护与循环控制
 
-复制 DataTable 列使用 `unreal_data_table_copy_property`，提供 `assetPath`、`sourceRow`、反射字段名 `propertyName` 和 UUID `requestId`；不提供 `targetRows` 时复制到其他所有行。UE 必须声明 `data_table_copy_property` 能力。缺少能力时停止并更新插件，不回退到其他导入方式。嵌套 Map、软对象引用及浮点值直接复制，验证失败恢复操作前的内存值，包括已有未保存修改；不会从磁盘重载资产。
+复制 DataTable 列使用 `unreal_data_table_copy_property`，提供 `assetPath`、`sourceRow`、反射字段名 `propertyName` 和 UUID `requestId`；不提供 `targetRows` 时复制到其他所有行。UE 必须声明 `data_table_copy_property` 能力。缺少能力时停止该复制操作并说明需要更新插件，不回退到其他导入方式。嵌套 Map、软对象引用及浮点值直接复制，验证失败恢复操作前的内存值，包括已有未保存修改；不会从磁盘重载资产。
 
-当前引擎 `DataTableTools.set_rows/add_rows/rename_rows` 的整表 JSON 往返可能损坏未指定字段，桥接在发送前拒绝这些入口。Slate 输入操作默认关闭；只读观察仍可用。UE 任务中调用 Shell 鼠标、键盘或剪贴板接口的替代路线同样被阻止。任意 MCP 返回 `isError:true` 会报告失败并结束当前任务，不把传输成功当作操作成功。通用 MCP 工具没有统一的事务回滚能力；工具未提供回滚时会明确记录未验证，不能声称已经恢复。
+当前引擎 `DataTableTools.set_rows/add_rows/rename_rows` 的整表 JSON 往返可能损坏未指定字段，桥接在发送前拒绝这些入口。Slate 输入操作默认关闭；只读观察仍可用。UE 任务中调用 Shell 鼠标、键盘或剪贴板接口的替代路线同样被阻止。MCP 返回 `isError:true` 或 `ok:false` 均报告失败，并保留 UE 原始错误。已确认只读的 `DataTableTools.get_schema/list_rows/get_rows/search_row_structs` 失败返回 `MCP_READ_ERROR`，其他未知或写入工具失败返回 `MCP_TOOL_ERROR`；这些错误反馈给模型，在预算内按错误纠正后继续，不直接取消整轮。策略拦截、能力不可用及已经恢复原状态的验证失败也保留纠正机会，但不能重复被禁操作或绕过保护；需要时改用许可方式，缺少必需能力则说明限制。
 
-首次 UE 工具调用激活本轮预算，默认最多 40 个根工具调用、40 个模型步骤、累计 3 次错误、180 秒。之后的源码读取、Shell 和其他工具也计入预算；改变参数、UUID、工具名或编辑器绑定不会重置。策略拒绝、完整性检查失败或回滚失败立即由宿主取消当前轮；只有新的用户轮次重置预算。回滚无法确认时，编辑器写锁对所有对话生效，`unreal_state.writeLock` 显示失败请求；应人工核查并恢复资产后重启宿主，不能让模型用新的请求绕过。
+通用 MCP 工具没有统一的事务回滚能力；工具未提供回滚时会明确记录未验证，不能声称已经恢复。写入失败后应先读取目标真实状态，再根据原始错误修正参数，不能盲目重放。已结束的失败请求修正后使用新 UUID；`MCP_TARGET_* / execution:not_started` 的预检拒绝未消费 UUID，可纠正参数后复用原 UUID。超时或断线造成结果未知时，先用原 UUID 调用 `unreal_request_status`，查清结果前不重复写入。通过 ObjectTools 追加数组元素时，原有元素必须保留读取返回的 JSON 表示，不能把已有字符串引用重新编码成 `refPath` 对象；仅追加新元素，避免同时改变旧值而使插入位置不明确。
 
-预算依赖 DSH 的 `session/event`、`tools/pre-execute`、`tools/post-execute` 和 `agent/pre-step` 扩展；这些钩子取消当前 Agent 回合，不修改 DSH 主循环。只有桥接工具包装器可用的嵌入环境仍能限制 UE 调用，但不能拦截其他插件的工具。`unreal_state.executionSafety` 返回当前预算与状态。
+首次 UE 工具调用激活本轮预算，默认最多 300 个根工具调用、200 个模型步骤、累计 50 次错误、30 分钟。错误上限是整轮累计失败次数，成功调用不会清零，并非同一失败请求可自动原样重试 50 次。之后的源码读取、Shell 和其他工具也计入预算；改变参数、UUID、工具名或编辑器绑定不会重置。接近上限时，工具结果的 `executionSafety.warning` 与 `remaining` 提醒模型尽快核验并收尾。工具次数、模型步数或错误预算耗尽时进入 `summary` 模式，拒绝新的任务工具，最多保留两次 `unreal_state` / `unreal_request_status` 查询、一个有限恢复阶段和最后一次无工具总结，合计最多两次额外模型采样，让模型说明已完成、未完成及保存状态；不会因预算耗尽立即取消整轮。
+
+回滚失败或 `EDITOR_WRITE_LOCKED` 同样进入状态查询与总结，不直接取消整轮。编辑器写锁仍对所有对话生效，`unreal_state.writeLock` 显示失败请求；应人工核查并恢复资产后重启宿主，不能让模型用新的请求绕过。总耗时超限仍立即由宿主取消当前轮。只有新的用户轮次重置预算，不能清除编辑器写锁。
+
+预算依赖 DSH 的 `session/event`、`tools/pre-execute`、`tools/post-execute` 和 `agent/pre-step` 扩展；这些钩子管理收尾或取消当前 Agent 回合，不修改 DSH 主循环。只有桥接工具包装器可用的嵌入环境仍能限制 UE 调用，但不能拦截其他插件的工具。`unreal_state.executionSafety` 返回当前预算、剩余额度和状态。预算与收尾修复只需更新 DSH 宿主并完整重启 DSH；关卡蓝图定位另需更新 UE 插件。
 
 在 DSH profile 的 `cordis.patch.yml` 中按插件 ID 覆盖配置：
 
@@ -140,10 +157,10 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
     requireApproval: false
     requestTimeoutMs: 30000
     allowMcpDesktopInput: false
-    guardMaxToolCalls: 40
-    guardMaxSteps: 40
-    guardMaxErrors: 3
-    guardTimeoutMs: 180000
+    guardMaxToolCalls: 300
+    guardMaxSteps: 200
+    guardMaxErrors: 50
+    guardTimeoutMs: 1800000
 ```
 
 连接描述文件默认位于 `%LOCALAPPDATA%\DSHUnrealBridge\bridge.json`，审计记录为同目录的 `audit.jsonl`。描述文件含临时令牌，请勿分享。Windows 使用当前用户目录的继承权限；不隔离同一 Windows 用户下的其他程序。
@@ -175,3 +192,5 @@ npm pack --pack-destination ..
 然后运行上方安装脚本，将 `-Project` 指向自己的 Unreal 工程。Git 仓库包含 UE 插件源码；预编译 DLL 不提交到 Git，需使用目标工程对应的 Unreal Engine 构建 Editor 目标。
 
 `src` 为宿主与客户端源码，`lib` 为 DSH 可加载产物，`unreal` 为 Editor 模块。UE 自动化测试位于 `DSH.Bridge`。`scripts/ue-e2e.mjs` 只应针对可丢弃的测试工程运行，会创建和保存测试蓝图；不可对 EHV 等生产工程运行。具体工具协议见 [docs/protocol.md](docs/protocol.md)，本次验证证据见 [docs/validation.md](docs/validation.md)。
+
+修改执行守卫或步骤提示后，还需使用安装的 DSH 运行 `scripts/execution-notice-session-check.mjs`。该脚本以离线模型响应驱动真实 AgentLoop，验证预警及各类收尾消息的会话保存、冷启动读取和回放；普通 `npm test` 不覆盖此宿主集成路径。
