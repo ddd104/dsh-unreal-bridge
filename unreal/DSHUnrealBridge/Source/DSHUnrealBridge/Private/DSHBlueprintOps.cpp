@@ -274,9 +274,35 @@ bool FDSHBlueprintOps::ApplyOperations(UBlueprint* BP,const TSharedPtr<FJsonObje
     FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);Graph->NotifyGraphChanged();return true;
 }
 
-TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TSharedPtr<FJsonObject>& Params,FString& ErrorCode,FString& ErrorMessage,FDSHAssetViewHint* ViewHint)
+void FDSHBlueprintOps::RecoverFailedPatch(UBlueprint* BP,const FString& Label,const FString& Base,FString& ErrorCode,FString& ErrorMessage,TSharedPtr<FJsonObject>* ErrorDetails)
+{
+    // Undo returning true is insufficient: verify the restored graph revision
+    // and compilation before letting the host treat another write as safe.
+    const bool Undone=GEditor&&GEditor->Trans&&GEditor->Trans->GetUndoContext().Title.ToString()==Label&&GEditor->UndoTransaction();
+    FString RecoveryError;
+    const bool Recompiled=Undone&&Compile(BP,RecoveryError);
+    const bool Restored=Recompiled&&Revision(BP)==Base;
+    ErrorCode=Restored?TEXT("APPLY_FAILED_ROLLED_BACK"):TEXT("ROLLBACK_FAILED");
+    if(!Restored)
+    {
+        ErrorMessage+=TEXT("; automatic rollback could not be verified; stop writes and inspect the editor");
+        if(!RecoveryError.IsEmpty())ErrorMessage+=TEXT("; ")+RecoveryError;
+    }
+    if(ErrorDetails)
+    {
+        *ErrorDetails=Obj();
+        (*ErrorDetails)->SetStringField(TEXT("execution"),TEXT("completed"));
+        (*ErrorDetails)->SetStringField(TEXT("rollback"),Restored?TEXT("restored"):TEXT("failed"));
+        (*ErrorDetails)->SetBoolField(TEXT("retryable"),Restored);
+        (*ErrorDetails)->SetBoolField(TEXT("undoApplied"),Undone);
+        (*ErrorDetails)->SetBoolField(TEXT("recompiled"),Recompiled);
+    }
+}
+
+TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TSharedPtr<FJsonObject>& Params,FString& ErrorCode,FString& ErrorMessage,FDSHAssetViewHint* ViewHint,TSharedPtr<FJsonObject>* ErrorDetails)
 {
     check(IsInGameThread());ErrorCode=TEXT("INVALID_REQUEST");
+    if(ErrorDetails)ErrorDetails->Reset();
     if(Method==TEXT("catalog"))
     {
         auto O=Obj();TArray<TSharedPtr<FJsonValue>> Entries;
@@ -344,8 +370,7 @@ TSharedPtr<FJsonObject> FDSHBlueprintOps::Execute(const FString& Method,const TS
         const auto Context=GEditor->Trans->GetUndoContext();
         if(!Success)
         {
-            const bool Restored=Context.Title.ToString()==Label&&GEditor->UndoTransaction();FString Ignored;if(Restored)Compile(BP,Ignored);
-            ErrorCode=Restored?TEXT("APPLY_FAILED_ROLLED_BACK"):TEXT("ROLLBACK_FAILED");if(!Restored)ErrorMessage+=TEXT("; automatic rollback was not possible; inspect the editor");return nullptr;
+            RecoverFailedPatch(BP,Label,Base,ErrorCode,ErrorMessage,ErrorDetails);return nullptr;
         }
         UndoTransactions.Add(BP->GetPathName(),Context.TransactionId);UndoRevisions.Add(BP->GetPathName(),Revision(BP));BP->MarkPackageDirty();
         auto O=Read(BP,Params);O->SetBoolField(TEXT("saved"),false);O->SetBoolField(TEXT("compiled"),true);O->SetObjectField(TEXT("layout"),LayoutData(AppliedLayout));return O;

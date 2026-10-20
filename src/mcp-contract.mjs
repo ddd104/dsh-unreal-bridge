@@ -1,5 +1,6 @@
 import Ajv from 'ajv';
 import {BridgeError,fail} from './protocol.mjs';
+import {isUnsafeWriteError} from './write-safety.mjs';
 
 const DATA_TABLE='editor_toolset.toolsets.data_table.DataTableTools';
 // Audited UE 5.8 data_table.py queries. Unknown tools remain potential writes;
@@ -55,7 +56,7 @@ export function mcpFailure(result,requestId=null,readOnly=false){
   const text=(result?.content??[]).filter(item=>item.type==='text').map(item=>item.text).join('\n')||result?.error?.message||result?.message||'The UE MCP tool reported failure';
   // Preserve explicit unsafe-state evidence through the MCP envelope. A
   // third-party "restored" claim alone must not establish rollback guarantees.
-  const unsafe=[result,result?.structuredContent].some(value=>value?.details?.rollback==='failed'||value?.error?.details?.rollback==='failed'||['DATA_TABLE_ROLLBACK_FAILED','EDITOR_WRITE_LOCKED'].includes(value?.error?.code));
+  const unsafe=isUnsafeWriteError(result);
   return new BridgeError(readOnly?'MCP_READ_ERROR':'MCP_TOOL_ERROR',text,{
     retryable:!unsafe,recovery:unsafe?'stop_writes':readOnly?'correct_and_retry':'verify_before_retry',readOnly,rollback:unsafe?'failed':readOnly?'not_needed':'not_available',requestId,ueResult:result
   });

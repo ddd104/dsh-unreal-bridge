@@ -12,6 +12,10 @@ public:
     using FCompletion = TFunction<void(bool, TSharedPtr<FJsonObject>)>;
 
     static FGuid Execute(const FString& Tool, const TSharedPtr<FJsonObject>& Arguments, UWorld* World, FCompletion Completion);
+    // Bridge admission, write protection and service routing share one tool catalog.
+    // Internal tools such as project_update are executable but not bridge-exposed.
+    static bool IsBridgeTool(const FString& Tool);
+    static bool IsWriteTool(const FString& Tool);
     static bool IsAvailable();
     static void Cancel(const FGuid& RequestId);
     static void CancelAll();

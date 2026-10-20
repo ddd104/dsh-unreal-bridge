@@ -5,10 +5,12 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "BlueprintEditor.h"
 #include "Editor.h"
+#include "Editor/TransBuffer.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Docking/TabManager.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/PackageName.h"
+#include "ScopedTransaction.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpressionConstant.h"
 #include "Engine/Blueprint.h"
@@ -82,6 +84,61 @@ bool FDSHBlueprintRoundTrip::RunTest(const FString&)
     auto Undo=MakeShared<FJsonObject>();Undo->SetStringField(TEXT("assetPath"),Path);Undo->SetStringField(TEXT("baseRevision"),Applied->GetStringField(TEXT("revision")));
     auto Undone=Ops.Execute(TEXT("undo"),Undo,Code,Error);
     if(TestTrue(TEXT("Undo owned transaction: ")+Error,Undone.IsValid()))TestEqual(TEXT("Undo restores original revision"),Undone->GetStringField(TEXT("revision")),Revision);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHBlueprintRollbackSafety,"DSH.Bridge.BlueprintRollbackSafety",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FDSHBlueprintRollbackSafety::RunTest(const FString&)
+{
+    FDSHBlueprintOps Ops;FString Code,Error;TSharedPtr<FJsonObject> Details;
+    const FString Path=TEXT("/Game/DSHBridgeTests/BP_Rollback_")+FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    auto Params=MakeShared<FJsonObject>();Params->SetStringField(TEXT("assetPath"),Path);Params->SetStringField(TEXT("parent"),TEXT("Actor"));
+    const auto Created=Ops.Execute(TEXT("create_blueprint"),Params,Code,Error);
+    if(!TestTrue(TEXT("Create rollback fixture: ")+Error,Created.IsValid()))return false;
+    UBlueprint* Blueprint=LoadObject<UBlueprint>(nullptr,*Created->GetStringField(TEXT("assetPath")));
+    if(!TestNotNull(TEXT("Fixture Blueprint is loaded"),Blueprint))return false;
+    TArray<UEdGraph*> Graphs;Blueprint->GetAllGraphs(Graphs);
+    if(!TestTrue(TEXT("Fixture has a graph node"),!Graphs.IsEmpty()&&!Graphs[0]->Nodes.IsEmpty()))return false;
+    UEdGraphNode* Node=Graphs[0]->Nodes[0];
+    const FString Before=FDSHBlueprintOps::Revision(Blueprint);
+    auto Change=[&](const FString& Label,const FString& Comment)
+    {
+        FScopedTransaction Transaction(FText::FromString(Label));
+        Blueprint->Modify();Graphs[0]->Modify();Node->Modify();Node->NodeComment=Comment;
+    };
+    const FString Owned=TEXT("DSH Test Owned Rollback ")+FGuid::NewGuid().ToString();
+    Change(Owned,TEXT("A partially applied edit"));
+    Error=TEXT("Simulated failure after mutation");
+    Ops.RecoverFailedPatch(Blueprint,Owned,Before,Code,Error,&Details);
+    TestEqual(TEXT("Owned transaction is restored"),Code,FString(TEXT("APPLY_FAILED_ROLLED_BACK")));
+    if(!TestTrue(TEXT("Recovery returns structured evidence"),Details.IsValid()))return false;
+    TestEqual(TEXT("Restored rollback evidence"),Details->GetStringField(TEXT("rollback")),FString(TEXT("restored")));
+    TestEqual(TEXT("Mutation was attempted"),Details->GetStringField(TEXT("execution")),FString(TEXT("completed")));
+    TestTrue(TEXT("Verified recovery permits correction"),Details->GetBoolField(TEXT("retryable")));
+    TestTrue(TEXT("Restored Blueprint compiles"),Details->GetBoolField(TEXT("recompiled")));
+    TestEqual(TEXT("Recovery restores the exact graph revision"),FDSHBlueprintOps::Revision(Blueprint),Before);
+
+    const FString Unverified=TEXT("DSH Test Unverified Rollback ")+FGuid::NewGuid().ToString();
+    Change(Unverified,TEXT("Another partially applied edit"));
+    Ops.RecoverFailedPatch(Blueprint,Unverified,TEXT("unmatched baseline"),Code,Error,&Details);
+    TestEqual(TEXT("Successful undo alone does not prove recovery"),Code,FString(TEXT("ROLLBACK_FAILED")));
+    TestTrue(TEXT("Undo was applied"),Details->GetBoolField(TEXT("undoApplied")));
+    TestEqual(TEXT("Mismatched restored revision is unsafe"),Details->GetStringField(TEXT("rollback")),FString(TEXT("failed")));
+    TestFalse(TEXT("Unverified recovery cannot be retried"),Details->GetBoolField(TEXT("retryable")));
+
+    const FString Unrelated=TEXT("DSH Test Unrelated Transaction ")+FGuid::NewGuid().ToString();
+    Change(Unrelated,TEXT("Unrelated editor edit must remain"));
+    const FString UnrelatedRevision=FDSHBlueprintOps::Revision(Blueprint);
+    Ops.RecoverFailedPatch(Blueprint,TEXT("Different owned transaction"),Before,Code,Error,&Details);
+    TestEqual(TEXT("Unowned transaction cannot be rolled back"),Code,FString(TEXT("ROLLBACK_FAILED")));
+    TestFalse(TEXT("Unrelated undo was not applied"),Details->GetBoolField(TEXT("undoApplied")));
+    TestEqual(TEXT("Unrelated editor change is preserved"),FDSHBlueprintOps::Revision(Blueprint),UnrelatedRevision);
+    TestEqual(TEXT("Missing owned transaction returns failed evidence"),Details->GetStringField(TEXT("rollback")),FString(TEXT("failed")));
+    TestFalse(TEXT("Failed recovery cannot be retried"),Details->GetBoolField(TEXT("retryable")));
+    if(GEditor->Trans->GetUndoContext().Title.ToString()==Unrelated)GEditor->UndoTransaction();
+
+    Ops.Execute(TEXT("read_blueprint"),Params,Code,Error,nullptr,&Details);
+    TestFalse(TEXT("A later result cannot reuse prior rollback details"),Details.IsValid());
     return true;
 }
 

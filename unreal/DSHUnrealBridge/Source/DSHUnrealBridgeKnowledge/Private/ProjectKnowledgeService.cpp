@@ -1,4 +1,5 @@
 #include "ProjectKnowledgeService.h"
+#include "ProjectKnowledgeTools.h"
 
 #include "DSHUnrealBridgeKnowledgeModule.h"
 #include "Async/Async.h"
@@ -447,6 +448,18 @@ bool FProjectKnowledgeService::IsAvailable()
         IFileManager::Get().FileExists(*FPaths::Combine(Plugin, TEXT("Tools/knowledge-worker.mjs")));
 }
 
+bool FProjectKnowledgeService::IsBridgeTool(const FString& Tool)
+{
+    const auto* Spec = ProjectKnowledgeTools::Find(Tool);
+    return Spec && Spec->bBridgeExposed;
+}
+
+bool FProjectKnowledgeService::IsWriteTool(const FString& Tool)
+{
+    const auto* Spec = ProjectKnowledgeTools::Find(Tool);
+    return Spec && Spec->bWrite;
+}
+
 void FProjectKnowledgeService::Initialize()
 {
     check(IsInGameThread());
@@ -461,10 +474,9 @@ FGuid FProjectKnowledgeService::Execute(const FString& Tool, const TSharedPtr<FJ
     const FGuid Id = FGuid::NewGuid();
     const TSharedPtr<FJsonObject> Args = Arguments.IsValid() ? Arguments : MakeShared<FJsonObject>();
     // 快照读取同样在游戏线程执行，避免缓存与编辑器对象并发变化。
-    const bool bSnapshot = Tool == TEXT("asset_snapshot") || Tool == TEXT("read_asset_snapshot") || Tool == TEXT("search_asset_snapshots");
-    const bool bUE = bSnapshot || Tool == TEXT("inspect_asset") || Tool == TEXT("inspect_object") || Tool == TEXT("find_objects");
-    // 经验存取由规划器在校验前后调用，和模型的只读取证工具列表保持独立。
-    const TSet<FString> WorkerTools = {TEXT("project_status"), TEXT("project_update"), TEXT("project_context"), TEXT("project_search"), TEXT("read_source"), TEXT("remember_evidence"), TEXT("validate_evidence"), TEXT("experience_lookup"), TEXT("experience_save"), TEXT("experience_feedback")};
+    const auto* Spec = ProjectKnowledgeTools::Find(Tool);
+    const bool bSnapshot = Spec && Spec->Backend == ProjectKnowledgeTools::EBackend::Snapshot;
+    const bool bUE = Spec && Spec->Backend != ProjectKnowledgeTools::EBackend::Worker;
     TSharedPtr<ProjectKnowledge::FRequest, ESPMode::ThreadSafe> Request = MakeShared<ProjectKnowledge::FRequest, ESPMode::ThreadSafe>();
     Request->Completion = MoveTemp(Completion);
     ProjectKnowledge::State->Requests.Add(Id, Request);
@@ -492,9 +504,9 @@ FGuid FProjectKnowledgeService::Execute(const FString& Tool, const TSharedPtr<FJ
         });
         return Id;
     }
-    if (!WorkerTools.Contains(Tool) || !IsAvailable())
+    if (!Spec || !IsAvailable())
     {
-        const FString Message = !WorkerTools.Contains(Tool) ? TEXT("Unknown read-only knowledge tool.") : TEXT("Plugin-local runtime or tools are missing; install the complete DSHUnrealBridge knowledge tools.");
+        const FString Message = !Spec ? TEXT("Unknown knowledge tool.") : TEXT("Plugin-local runtime or tools are missing; install the complete DSHUnrealBridge knowledge tools.");
         AsyncTask(ENamedThreads::GameThread, [Finish, Message]() mutable { Finish(false, ProjectKnowledge::Error(Message)); });
         return Id;
     }

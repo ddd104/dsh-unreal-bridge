@@ -328,12 +328,14 @@ test('failed rollback and write locks reserve status queries and a summary witho
     ['UNEXPECTED_ERROR',{rollback:'failed'}],
     ['MCP_READ_ERROR',{readOnly:true,rollback:'failed'}],
     ['DATA_TABLE_ROLLBACK_FAILED',{}],
+    ['ROLLBACK_FAILED',{}],
     ['EDITOR_WRITE_LOCKED',{}],
   ]){
     const f=fixture(t);const call=f.exec();await f.pre(call);
     f.guard.after(call,{ok:false,error:{code,message:'Unsafe editor state',details}});
     const state=f.guard.status(f.session.id);
     assert.equal(state.halted,false,code);assert.equal(state.exhaustedBy,'unsafe_state',code);
+    assert.equal(state.lastError.rollback,'failed',code);assert.equal(state.lastError.recovery,'stop_writes',code);
     assert.equal((await f.pre(f.exec('unreal_apply'))).kind,'deny');
     assert.deepEqual((await f.assemble()).tools.map(tool=>tool.name),['unreal_state','unreal_request_status']);
     assert.equal((await f.step(2)).kind,'enter');

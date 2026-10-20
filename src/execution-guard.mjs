@@ -1,8 +1,8 @@
 import {BridgeError} from './protocol.mjs';
 import {randomUUID} from 'node:crypto';
+import {isUnsafeWriteError} from './write-safety.mjs';
 
 export const EXECUTION_LIMIT_DEFAULTS=Object.freeze({guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000});
-const UNSAFE_STATE_CODES=new Set(['DATA_TABLE_ROLLBACK_FAILED','EDITOR_WRITE_LOCKED']);
 const RECOVERY_TOOLS=new Set(['unreal_state','unreal_request_status']);
 const RECOVERY_CALL_LIMIT=2;
 const nonnegative=value=>Number.isFinite(value)?Math.max(0,Math.min(Number.MAX_SAFE_INTEGER,Math.trunc(value))):0;
@@ -148,11 +148,11 @@ export function registerExecutionGuard(ctx,config={}){
     const code=error?.code??error?.info?.code;
     const details=error?.details??error?.info?.details??body?.details;
     if(code==='EXECUTION_BUDGET_EXHAUSTED')return value;
-    const unsafe=UNSAFE_STATE_CODES.has(code)||details?.rollback==='failed';
+    const unsafe=isUnsafeWriteError(body);
     if(!state.failedRoots.has(root)){
       state.failedRoots.add(root);state.errors++;
       const recovery=unsafe?'stop_writes':['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN'].includes(code)?'check_request_status':details?.rollback==='not_available'?'verify_before_retry':code==='MCP_POLICY_BLOCKED'||details?.retryable===false&&details?.rollback!=='restored'?'choose_supported_operation':'correct_and_retry';
-      state.lastError={code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',rollback:details?.rollback??null,recovery};
+      state.lastError={code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',rollback:unsafe?'failed':details?.rollback??null,recovery};
     }
     if(unsafe){
       // A late result from an admitted parallel call may reveal unsafe state

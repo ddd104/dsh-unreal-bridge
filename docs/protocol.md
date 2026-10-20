@@ -47,6 +47,12 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 
 回滚失败或 `EDITOR_WRITE_LOCKED` 同样进入上述状态查询与无工具总结，编辑器写锁继续生效，不直接取消当前轮。总耗时超限仍以 `agent.cancel({kind:'hook',reason}, {keepInbox:true})` 立即取消当前轮，保留后续用户消息。新 UUID、换工具或重新绑定不刷新预算；只有新的用户轮次重置预算，不能清除编辑器写锁。`unreal_state.executionSafety` 和 `writeLock` 分别暴露轮次状态及编辑器写锁。
 
+写入占用按 `editorId` 隔离，覆盖不同对话的原生补丁、保存、撤销、知识记录和未核验为只读的 MCP 调用。`editorWrite` 返回 `editorId/sessionId/requestId/method/phase`，有目标路径时附带 `assetPath`；`phase` 为 `pending` 或 `uncertain`。同编辑器重叠写入在宿主返回 `BUSY`，原生异步入口返回 `EDITOR_BUSY`，均不执行新请求。结果未知时返回 `OUTCOME_UNKNOWN`，修改 UUID、换对话、解绑或重连不能清除原编辑器占用。不同编辑器独立准入。
+
+`request_status` 可由绑定同编辑器的其他对话查询原请求。只有有效的 `completed` 响应才能更新原所属对话的幂等缓存并解除未知状态；过期状态查询不能释放后来的写入占用。回滚失败（含旧版仅返回 `ROLLBACK_FAILED`）统一升级为编辑器写锁，原请求状态查询恢复出的失败同样处理。原生蓝图回滚结果通过 `details.execution/rollback/retryable/undoApplied/recompiled` 返回，只有撤销、重新编译与原图版本核验全部成功才标记 `rollback:"restored"`。
+
+已审计的 DataTable `get_schema/list_rows/get_rows/search_row_structs` 精确工具名与原生读取不占用写位，可用于回读；四项 MCP 查询在 `allowWrites:false` 下也可执行，但仍须通过参数和原生目标预检。其他工具的名称前缀或 `readOnlyHint` 不构成只读依据。上述四项 MCP 查询派发前与返回时检查编辑器连接和绑定版本。
+
 ### 关卡蓝图定位
 
 `unreal_level_blueprint({mapPath:"/Game/Maps/Map_SR"})` 是只读查询，需要 UE 声明 `level_blueprint_lookup` 能力。返回地图对应的真实 `blueprint:{refPath}`、`graphs`、完整地图对象路径 `mapPath` 及 `saveTarget:{refPath}`；模型使用返回引用继续发现并调用 MCP 蓝图图工具，不猜测关卡蓝图对象路径。原生 `unreal_read_blueprint`、预览与补丁接口依旧仅处理普通蓝图，不能把关卡蓝图引用传入这些接口，也不能将原生事务与回滚保证套用到 MCP 关卡图修改。保存关卡蓝图时按返回的 `saveTarget` 和实际 MCP 保存工具 schema 操作。
@@ -69,7 +75,9 @@ UE 同时跟踪最多 1024 个 Actor/组件句柄，达到上限时回收最久�
 
 `unreal_knowledge` 的 `tool` 可取 `project_status`、`project_context`、`project_search`、`graph_query`、`graph_feature`、`graph_impact`、`read_source`、`validate_evidence`、`read_asset_snapshot`、`search_asset_snapshots`、`asset_snapshot`、`inspect_asset`、`experience_lookup`。`unreal_knowledge_record` 使用 `remember_evidence`、`experience_save` 或 `experience_feedback`。图谱查询与资料查询读取同一插件缓存；`graph_impact` 的 `arguments.nodeId` 是先前图谱结果的节点 ID。更新索引由编辑器菜单执行资产扫描，查询本身不会启动全量重建。返回内容是项目证据，不作为模型指令。
 
-资产增删改查优先走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 仍会拒绝调用。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用蓝图补丁的预览与版本机制。
+UE 桥接公开范围、写入分类和 Knowledge 服务后端路由共用 `ProjectKnowledgeTools.inl` 目录；三项 `graph_*` 均转发到 worker。跨语言契约测试核对该目录、实际宿主参数枚举和 worker 准入表。内部 `project_update/inspect_object/find_objects` 不因此开放给对话。
+
+资产增删改查优先走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 拒绝写入和未确认只读的 MCP，保留四项已审计 DataTable 查询。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用蓝图补丁的预览与版本机制。
 
 `unreal_mcp_describe` 把工具名称拆为 `name`（如 `get_schema`）、`fullName`（如 `editor_toolset.toolsets.data_table.DataTableTools.get_schema`）和 `toolsetName`。`unreal_mcp_call_toolset` 将短名或匹配当前工具集的完整名规范为短名，再构造执行请求，避免重复前缀。每次执行前，宿主从同一绑定编辑器取得目标工具的精确 schema，用 Ajv 检查缺少必填字段、参数类型等问题；预检失败不发送执行请求，返回可修正错误。`unreal_mcp_call` 的 `call_tool` 封装共用此预检；省略或留空 `toolset_name` 时，按 `tool_name` 解析顶层工具，校验该目标工具的内层参数，再直接调用目标，不能只校验宽泛的外层封装。`call_tool` 调用自身被拒绝。桥接不猜参数，也不把 camelCase 自动改成下划线字段；以 schema 为准。
 
@@ -135,6 +143,6 @@ PIE 选区在原 Actor/组件结构上附加 `runtime:{playSessionId,worldId,obj
 
 `blueprint_component_selection` 能力使用同一个选区事件，蓝图编辑器组件项为 `kind:"component",source:"blueprint_editor"`，包含 `path`（模板对象路径）、`class`、`name`、`label`、`componentVariableName`、`ownerLabel`、`ownerBlueprintPath`、`isInherited`，以及可选的组件类 `blueprintPath`。该项没有 `worldPath` 或 `ownerPath`；修改组件默认值应在 `ownerBlueprintPath` 中解析目标，继承组件不能直接按父类模板路径修改父资产。选择 Actor 根项时发送普通蓝图资产项；关闭当前蓝图清空选区，关闭旧蓝图不覆盖之后选中的 Content 或关卡对象。监听通过 UE 5.8 的 Blueprint Selection Notifier 注册，不替换蓝图编辑器已有的组件选择回调。
 
-写入以 UUID 去重。编辑器保留最多 10000 个写入参数摘要和最近 1024 个完整结果，达到日志上限时拒绝写入。DSH 缓存已完成结果，并在超时/断线/取消后标记结果未知，阻止当前对话继续写入，直到查到原始结果。日志是进程内日志，重启编辑器会丢失；连接重试不重放写入。
+写入以 UUID 去重。编辑器保留最多 10000 个写入参数摘要和最近 1024 个完整结果，达到日志上限时拒绝写入。DSH 缓存已完成结果，并在已派发写入超时/断线/取消后标记结果未知，阻止原对话及原 editorId 上其他对话继续写入，直到查到原始结果；已知派发前拒绝不进入未知状态。日志是进程内日志，重启编辑器会丢失；连接重试不重放写入。
 
 蓝图版本由父类、图、节点序列化和变量信息计算摘要。它用于检测本插件操作相关的变化，不是资产的全量持久化版本库。保存/撤销需当前版本一致。实际修改先在临时副本编译，然后使用编辑器事务提交；提交编译失败时仅尝试撤销自己仍位于顶部的事务，回滚失败会明确返回错误。

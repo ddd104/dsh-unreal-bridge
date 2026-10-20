@@ -1,5 +1,17 @@
 # 本机验证记录
 
+## 2026-10-20 回滚保护、编辑器写入协调与知识路由（0.4.5）
+
+- 架构调整限定在执行边界：宿主共用 `isUnsafeWriteError` 判定回滚失败，`EditorWrites` 管理每个编辑器的 `pending/uncertain` 写入占用；UE 原生异步入口另行拒绝重叠修改。冲突立即返回未执行的 `BUSY/EDITOR_BUSY`，不把可能过期的编辑请求排入后台队列。不同编辑器可独立执行，原生读取和四项精确审计的 DataTable MCP 查询可回读。
+- 原生蓝图自动回滚只有在撤销成功、重新编译成功和图 revision 恢复原值后才报告 `rollback:"restored"`；否则输出 `ROLLBACK_FAILED` 与结构化失败详情。宿主兼容旧版只返回此错误码的情况，普通失败、MCP 嵌套失败和原请求状态恢复共用分类器。超过 2 MiB 的失败响应截短诊断内容，保留错误码、回滚与重试语义，不因响应限额丢失写锁依据。
+- 已派发写入超时、取消或断线后，原编辑器的其他对话也无法继续写入。原请求结果可由同编辑器的其他对话查询，完成时更新原所属对话缓存；未知、过期、无效响应和迟到的旧查询均不能解除保护或释放新请求。派发前取消、审计失败、原生预检拒绝不占用未知状态，也不消费请求 UUID。已审计 MCP 读取在派发前和返回时检查绑定版本。
+- UE Knowledge 服务改用 `ProjectKnowledgeTools.inl` 单一目录决定后端、写入类别和桥接公开范围，消除主桥接与服务层白名单漂移。`graph_query/graph_feature/graph_impact` 已正确进入 worker；内部索引更新和其他未公开工具不扩大权限。新增 worker 准入模块同步加入 UE 打包清单。
+- `npm run check` 构建与 **208/208** 项宿主测试通过，记录 `.test-state/architecture-fixes-host-check.log`。新增真实回环 WebSocket 回归覆盖多对话互斥、不同编辑器并发、未知状态跨对话恢复、UUID 不重放、解绑/重连、迟到状态、无效响应、旧版回滚错误、派发前取消及审计失败、读取期间 A→B→A；另有错误分类和跨语言目录/只读策略一致性测试。
+- 知识工具构建与 **28/28** 项测试通过（ProjectGraph 5、ProjectMemorySystem 21、worker 路由 2）。新增 worker 回归在临时工程缓存中检索实际 Class/Function/关系，覆盖三项图查询、空参数及关闭图谱的情况；未使用 EHV 索引或资产。
+- UE 5.8.2 隔离 HostProject 完整 Editor 目标构建成功，最终增量构建记录 `.test-state/architecture-fixes-native-build-final.log`。原生自动化 **13/13** 项成功，进程退出 0：新增 `BlueprintRollbackSafety`、`WriteCoordination.AsyncAdmission`、`WriteCoordination.BoundedFailures`、`Knowledge.ToolCatalog`、`Knowledge.GraphWorkerRouting`，以及原蓝图往返、DataTable 复制与 MCP 目标校验回归。报告 `.test-state/architecture-fixes-native-report/index.json`，日志 `.test-state/architecture-fixes-native-automation.log`。图谱原生测试通过实际服务启动 worker 并检查其参数/缓存业务校验；查询结果正确性另由 worker 临时图谱回归覆盖。
+- 最终宿主 bundle 通过实际安装 DSH 的 MCP ToolRuntime **7/7** 组和 AgentLoop/Session/JSONL 保存、冷读取与回放 **8/8** 组检查，报告 `.test-state/architecture-fixes-mcp-runtime.json` 与 `.test-state/architecture-fixes-session-runtime.json`；报告中的 bundle SHA-256 与最终 `lib/index.js` 一致。这些检查使用回环编辑器及离线模型适配器，未请求在线模型。
+- 本次更新工作区源码、文档和宿主 bundle，并在 `.test-state/presentation-plugin-compiled/HostProject` 编译验证 UE DLL。**未安装到 DSH desktop 或 EHV，未关闭用户应用，未修改 EHV 资产。** 完整生效需要后续更新两端插件并重启对应应用。
+
 ## 2026-10-20 工具异常纠正与错误预算
 
 - 默认预算调整为 300 个根工具调用、200 个模型步骤、累计 50 次错误和 30 分钟；显式配置仍有效。成功调用不清零累计错误，换参数、UUID、工具或编辑器绑定不重置预算。

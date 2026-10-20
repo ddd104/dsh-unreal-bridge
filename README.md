@@ -1,4 +1,4 @@
-# DSH Unreal Bridge 0.4.4
+# DSH Unreal Bridge 0.4.5
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 资产、关卡 Actor 或组件选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
@@ -86,7 +86,7 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 安装脚本发现旧 `AgentProjectGraph/Cache` 时，会复制其 UE 快照及证据到新插件缓存，再把旧插件移入工程的 `Saved/DSHUnrealBridgeBackups/`，避免旧菜单与 HTTP 服务继续加载。旧图谱和记忆不会直接复用；在编辑器中更新一次即可按新路径重建。
 
-**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 仍会禁用 MCP 调用和其他写入。安装配置将 `requireApproval` 设为 `false`，使蓝图应用、撤销、保存和项目知识记录不再调用 DSH 批准服务，适配 `approval: never` 的会话。预览、版本校验、请求去重及显式保存要求仍然生效。若希望这些写入逐次请求批准，可将 `requireApproval` 改为 `true`，并使用 `approval: ask` 的 DSH preset。
+**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 禁用写入和未确认只读的 MCP；四项已审计 DataTable 查询仍可执行。安装配置将 `requireApproval` 设为 `false`，使蓝图应用、撤销、保存和项目知识记录不再调用 DSH 批准服务，适配 `approval: never` 的会话。预览、版本校验、请求去重及显式保存要求仍然生效。若希望这些写入逐次请求批准，可将 `requireApproval` 改为 `true`，并使用 `approval: ask` 的 DSH preset。
 
 ## 已实现
 
@@ -145,6 +145,10 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 回滚失败或 `EDITOR_WRITE_LOCKED` 同样进入状态查询与总结，不直接取消整轮。编辑器写锁仍对所有对话生效，`unreal_state.writeLock` 显示失败请求；应人工核查并恢复资产后重启宿主，不能让模型用新的请求绕过。总耗时超限仍立即由宿主取消当前轮。只有新的用户轮次重置预算，不能清除编辑器写锁。
 
+0.4.5 将原生蓝图 `ROLLBACK_FAILED` 与 DataTable/MCP 的回滚失败统一纳入写锁。蓝图补丁失败后的自动回滚还必须重新编译通过、图版本恢复为修改前版本，才报告已恢复。宿主兼容旧 UE 只返回错误码的情况；完整的原生恢复核验需要同步更新 UE 插件。
+
+同一编辑器的所有对话共用写入占用；另一对话的写入尚未完成时返回 `BUSY`，UE 原生异步入口也会拒绝重叠修改。已派发的写入超时、取消或断线后，保护继续作用于该编辑器，`unreal_state.editorWrite` 显示原请求及所属对话。任何绑定到同一编辑器的对话都可用原 `requestId` 查询完成结果；确认完成后更新原对话缓存并解除占用，若结果报告回滚失败则转为写锁。`pending`、`unknown`、`expired` 或无效状态响应不会解除保护。其他编辑器可独立工作；原生读取及已核验的四项 DataTable MCP 查询仍可用于回读，未知 MCP 工具继续按可能写入处理。
+
 预算依赖 DSH 的 `session/event`、`tools/pre-execute`、`tools/post-execute` 和 `agent/pre-step` 扩展；这些钩子管理收尾或取消当前 Agent 回合，不修改 DSH 主循环。只有桥接工具包装器可用的嵌入环境仍能限制 UE 调用，但不能拦截其他插件的工具。`unreal_state.executionSafety` 返回当前预算、剩余额度和状态。预算与收尾修复只需更新 DSH 宿主并完整重启 DSH；关卡蓝图定位另需更新 UE 插件。
 
 在 DSH profile 的 `cordis.patch.yml` 中按插件 ID 覆盖配置：
@@ -167,7 +171,7 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 若修改 `stateDir`，UE 需以 `-DSHBridgeDescriptor="绝对路径\bridge.json"` 启动。多个 DSH host 应使用不同端口和状态目录。端口被占用时插件会报错，不自动接管其他进程。
 
-`CONFLICT` / `PREVIEW_EXPIRED`：重新读取、预览。`BUSY`：退出 PIE、结束当前事务后再试。`OUTCOME_UNKNOWN`：先调用 `unreal_request_status`，不可换新请求编号盲目重复写入。如果编辑器已经重启、原请求记录无法查询，人工检查资产后在新对话中重新读取再规划；旧对话保持写入保护。`UNDO_NOT_LATEST`：请使用 UE 的撤销历史。
+`CONFLICT` / `PREVIEW_EXPIRED`：重新读取、预览。`BUSY` / `EDITOR_BUSY`：先确认是否有其他对话正在修改同一编辑器；等待其完成，必要时查询原请求状态，再检查 PIE 或当前事务。`OUTCOME_UNKNOWN`：先调用 `unreal_request_status`，不可换新请求编号盲目重复写入。如果 UE 进程已经重启并获得新的 editorId、原请求记录无法查询，人工检查资产后才可在新对话中重新读取再规划；旧对话保持写入保护。同一 editorId 的网络重连或换对话不会解除占用。`UNDO_NOT_LATEST`：请使用 UE 的撤销历史。
 
 ## 卸载
 

@@ -15,6 +15,7 @@ import { memoryStatus } from './ProjectMemorySystem/dist/src/commands/memoryStat
 import { loadProjectConfig } from './ProjectMemorySystem/dist/src/config/loadProjectConfig.js';
 import { MemoryStore } from './ProjectMemorySystem/dist/src/memory/memoryStore.js';
 import { createExperienceStore } from './experience-store.mjs';
+import { isWorkerTool } from './knowledge-tools.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const slash = value => value.replaceAll('\\', '/');
@@ -293,6 +294,7 @@ export async function createWorker(projectPath, pluginPath) {
     let lock;
     const lockPath=path.join(cache,'.worker.lock');
     try {
+      if (!isWorkerTool(request?.tool)) fail('unknown_tool',`Unsupported knowledge worker tool: ${request?.tool}`);
       // 跨进程串行化读写，避免 UE 和外部请求读到半发布的代目录。
       await safeCache(lockPath);
       try {lock=await open(lockPath,'wx');await lock.writeFile(JSON.stringify({pid:process.pid,createdAt:Date.now()}));}

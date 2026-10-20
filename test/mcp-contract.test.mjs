@@ -111,6 +111,8 @@ test('explicit rollback failures and write lock codes survive MCP error envelope
     {isError:true,details:{rollback:'failed'}},
     {isError:true,structuredContent:{error:{details:{rollback:'failed'}}}},
     {ok:false,error:{code:'DATA_TABLE_ROLLBACK_FAILED',message:'Restore failed'}},
+    {ok:false,error:{code:'ROLLBACK_FAILED',message:'Blueprint restore failed'}},
+    {isError:true,structuredContent:{error:{code:'ROLLBACK_FAILED'}}},
     {ok:false,error:{code:'EDITOR_WRITE_LOCKED',message:'Editor is locked'}},
     {isError:true,structuredContent:{error:{code:'DATA_TABLE_ROLLBACK_FAILED'}}},
     {isError:true,structuredContent:{error:{code:'EDITOR_WRITE_LOCKED'}}},
