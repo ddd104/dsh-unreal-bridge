@@ -3,9 +3,29 @@ import {BridgeError,fail} from './protocol.mjs';
 import {isUnsafeWriteError} from './write-safety.mjs';
 
 const DATA_TABLE='editor_toolset.toolsets.data_table.DataTableTools';
-// Audited UE 5.8 data_table.py queries. Unknown tools remain potential writes;
+export const BLUEPRINT_TOOLSET='editor_toolset.toolsets.blueprint.BlueprintTools';
+export const OBJECT_TOOLSET='editor_toolset.toolsets.object.ObjectTools';
+// Audited blueprint.py/object.py and their native graph/property query paths.
+// read_graph_dsl/get_node_type_pins temporarily add/remove live nodes: excluded.
+export const BLUEPRINT_READ_TOOLS=Object.freeze(['get_default_object','list_graphs','find_nodes','get_node_infos'].map(name=>`${BLUEPRINT_TOOLSET}.${name}`));
+export const OBJECT_READ_TOOLS=Object.freeze(['get_class','get_properties','list_properties'].map(name=>`${OBJECT_TOOLSET}.${name}`));
+export const MATERIAL_TOOLSET='editor_toolset.toolsets.material.MaterialTools';
+// Audited UE 5.8 material.py and its MaterialEditingLibrary query implementations.
+// Keep the native IsAuditedMcpRead allowlist aligned with these exact names.
+export const MATERIAL_READ_TOOLS=Object.freeze([
+  'list_expression_classes','get_expressions','list_parameter_groups',
+  'get_expression_input_names','get_expression_output_names','get_expression_inputs',
+  'get_property_input','get_referencing_materials',
+].map(name=>`${MATERIAL_TOOLSET}.${name}`));
+// Audited UE 5.8 queries. Unknown tools remain potential writes;
 // a get_/list_ prefix or a caller-supplied annotation cannot establish safety.
-const READS=new Set(['get_schema','list_rows','get_rows','search_row_structs'].map(name=>`${DATA_TABLE}.${name}`));
+export const AUDITED_MCP_READS=Object.freeze([
+  ...['get_schema','list_rows','get_rows','search_row_structs'].map(name=>`${DATA_TABLE}.${name}`),
+  ...MATERIAL_READ_TOOLS,
+  ...BLUEPRINT_READ_TOOLS,
+  ...OBJECT_READ_TOOLS,
+]);
+const READS=new Set(AUDITED_MCP_READS);
 const notStarted={execution:'not_started',retryable:true};
 
 /** Accept a short name or one exact prefix belonging to the selected toolset. */
@@ -47,8 +67,20 @@ export function validateMcpArguments(tool,args){
 }
 
 export function isReadOnlyMcpCall(call){
-  const fullName=call.name==='call_tool'?`${call.arguments.toolset_name}.${call.arguments.tool_name}`:call.name;
-  return READS.has(fullName);
+  return READS.has(mcpOperationToolName(call));
+}
+
+export function mcpOperationToolName(call){
+  if(typeof call?.name!=='string')return '';
+  if(call.name.toLowerCase()!=='call_tool')return call.name;
+  const toolset=call.arguments?.toolset_name,tool=call.arguments?.tool_name;
+  if(typeof tool!=='string')return '';
+  return typeof toolset==='string'&&toolset&&!tool.startsWith(`${toolset}.`)?`${toolset}.${tool}`:tool;
+}
+
+export function requiresMcpOperationContext(call){
+  const name=mcpOperationToolName(call);
+  return typeof name==='string'&&[BLUEPRINT_TOOLSET,OBJECT_TOOLSET].some(toolset=>name.startsWith(`${toolset}.`));
 }
 
 /** Preserve UE evidence while allowing a state-aware correction, not blind replay. */

@@ -4,9 +4,17 @@ import {isUnsafeWriteError} from './write-safety.mjs';
 import {DEFAULTS} from './settings-spec.mjs';
 
 export const REPAIR_LIMIT_DEFAULTS=Object.freeze({guardMaxRepairAttempts:DEFAULTS.guardMaxRepairAttempts,guardMaxRepeatedErrors:DEFAULTS.guardMaxRepeatedErrors});
+// Recovery guidance is explicit about task continuity. The host can enforce
+// native target identity, but cannot infer whether two assets serve one user task.
+export const REPAIR_STOP_CONSTRAINTS=Object.freeze({
+  retainTarget:true,retainDiagnostics:true,
+  prohibitedWorkarounds:Object.freeze(['new_request_id','tool_alias','rename_target','duplicate_target','rebuild_replacement']),
+  independentWork:'already_requested_unrelated_work',resumeSameProblem:'new_user_turn',
+});
+export const REPAIR_STOP_INSTRUCTION='停止重试这一项并保留原目标及诊断；不得靠换名新建、复制或重建替代资产继续同一交付任务。可以继续读取诊断、查询原请求状态，以及用户已要求且与该问题无关的其他目标或操作。只有真实新用户轮次会重置额度。';
 const MAX_ISSUES=512, DISPLAY_ISSUES=32;
 const UUID=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NOT_DISPATCHED_ERRORS=new Set(['OUTCOME_UNKNOWN','IN_PROGRESS','BUSY','EDITOR_BUSY','EDITOR_WRITE_LOCKED','READ_ONLY','PERMISSION_DENIED','APPROVAL_UNAVAILABLE']);
+const NOT_DISPATCHED_ERRORS=new Set(['OUTCOME_UNKNOWN','IN_PROGRESS','BUSY','EDITOR_BUSY','EDITOR_WRITE_LOCKED','MATERIAL_EDITOR_CONFLICT','READ_ONLY','PERMISSION_DENIED','APPROVAL_UNAVAILABLE']);
 const PROTECTED_ERRORS=new Set(['TIMEOUT','CANCELLED','DISCONNECTED',...NOT_DISPATCHED_ERRORS]);
 const normalized=value=>value.trim().toLowerCase();
 const fingerprint=error=>createHash('sha256').update(JSON.stringify([
@@ -59,8 +67,9 @@ export class RepairTracker{
     const reason=issue.blockedBy==='repeated_errors'
       ?`同一问题已连续出现 ${issue.repeatedErrors} 次相同错误`
       :`同一问题已用完 ${this.limits.guardMaxRepairAttempts} 次修复写入额度`;
-    return new BridgeError('REPAIR_BUDGET_EXHAUSTED',`${reason}。停止重试这一项；可以继续读取诊断、查询原请求状态或处理其他目标和独立操作。`,{
+    return new BridgeError('REPAIR_BUDGET_EXHAUSTED',`${reason}。${REPAIR_STOP_INSTRUCTION}`,{
       execution:'not_started',retryable:false,scope:'problem',canContinueIndependentWork:true,problem:this.summary(issue),
+      recovery:'stop_problem',recoveryConstraints:REPAIR_STOP_CONSTRAINTS,
     });
   }
   admit(operation){

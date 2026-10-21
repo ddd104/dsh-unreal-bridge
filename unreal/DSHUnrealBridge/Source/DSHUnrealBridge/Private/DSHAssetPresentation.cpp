@@ -1,28 +1,133 @@
 #include "DSHAssetPresentation.h"
 
 #include "BlueprintEditor.h"
+#include "Containers/Ticker.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
+#include "EdGraph/EdGraphPin.h"
 #include "Editor.h"
+#include "Editor/TransBuffer.h"
 #include "Engine/Blueprint.h"
 #include "Engine/Level.h"
 #include "Engine/LevelScriptBlueprint.h"
 #include "Engine/LevelStreaming.h"
 #include "Engine/World.h"
 #include "Framework/Application/SlateApplication.h"
+#include "Framework/Commands/UICommandList.h"
 #include "Framework/Docking/TabManager.h"
+#include "Framework/Notifications/NotificationManager.h"
 #include "GraphEditor.h"
 #include "IMaterialEditor.h"
+#include "MaterialEditorActions.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialExpressionComment.h"
 #include "Materials/MaterialFunctionInterface.h"
 #include "Misc/PackageName.h"
 #include "Subsystems/AssetEditorSubsystem.h"
 #include "Widgets/Docking/SDockTab.h"
+#include "Widgets/Notifications/SNotificationList.h"
 #include "Widgets/SWindow.h"
 
 namespace
 {
+namespace DSHMaterialPresentationPrivate
+{
+struct FUndoOperation
+{
+    FGuid OperationId;
+    TWeakObjectPtr<UEditorEngine> Editor;
+    bool bPreviousSuspend = false;
+};
+
+struct FMaterialUndoSync
+{
+    TWeakObjectPtr<UTransBuffer> Transactor;
+    FDelegateHandle StateHandle;
+    FTSTicker::FDelegateHandle TickHandle;
+    TArray<FUndoOperation> Operations;
+    TArray<TWeakObjectPtr<UObject>> PendingAssets;
+    bool bNotifyViews = false;
+
+    void StateChanged(const FTransactionContext& Context, ETransactionStateEventType State)
+    {
+        if (Context.Context != FDSHAssetPresentation::MaterialTransactionContext()) return;
+        if (State == ETransactionStateEventType::UndoRedoStarted && GEditor)
+        {
+            // MaterialEditor::MatchesContext accepts every material transaction,
+            // and PostUndo copies its preview back to its original. This native
+            // transaction owns only original-asset state, so letting those undo
+            // clients run would undo the Undo and Apply unrelated pending edits.
+            FUndoOperation& Operation = Operations.AddDefaulted_GetRef();
+            Operation.OperationId = Context.OperationId;
+            Operation.Editor = GEditor;
+            Operation.bPreviousSuspend = GEditor->bSuspendBroadcastPostUndoRedo;
+            GEditor->bSuspendBroadcastPostUndoRedo = true;
+        }
+        else if (State == ETransactionStateEventType::UndoRedoFinalized && !Operations.IsEmpty()
+            && Operations.Last().OperationId == Context.OperationId)
+        {
+            const FUndoOperation Operation = Operations.Pop();
+            if (UEditorEngine* Editor = Operation.Editor.Get())
+                Editor->bSuspendBroadcastPostUndoRedo = Operation.bPreviousSuspend;
+            // Preserve the normal undo pin cleanup before any graph rebuild,
+            // but do not override an existing owner's suppression policy.
+            if (!Operation.bPreviousSuspend) UEdGraphPin::SanitizePinsPostUndoRedo();
+            if (IsValid(Context.PrimaryObject)) PendingAssets.AddUnique(Context.PrimaryObject);
+            bNotifyViews |= !Operation.bPreviousSuspend;
+            // UTransBuffer emits Finalized before clearing GIsTransacting;
+            // RefreshGraphFromOriginal deliberately refuses to run until later.
+            if (!TickHandle.IsValid())
+                TickHandle = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([this](float)
+                {
+                    FDSHAssetPresentation::FlushPendingMaterialEditorSync();
+                    if (!PendingAssets.IsEmpty() || bNotifyViews) return true;
+                    TickHandle.Reset();
+                    return false;
+                }));
+        }
+    }
+
+    void Shutdown()
+    {
+        if (UTransBuffer* Buffer = Transactor.Get()) Buffer->OnTransactionStateChanged().Remove(StateHandle);
+        StateHandle.Reset(); Transactor.Reset();
+        FTSTicker::GetCoreTicker().RemoveTicker(TickHandle); TickHandle.Reset();
+        while (!Operations.IsEmpty())
+        {
+            const FUndoOperation Operation = Operations.Pop();
+            if (UEditorEngine* Editor = Operation.Editor.Get())
+                Editor->bSuspendBroadcastPostUndoRedo = Operation.bPreviousSuspend;
+        }
+        PendingAssets.Reset(); bNotifyViews = false;
+    }
+};
+
+FMaterialUndoSync MaterialUndoSync;
+
+bool CanRefresh(IMaterialEditor* Editor, UObject* Asset, FString& Reason)
+{
+    // OnApplyEnabled in the supported Material Editor returns bMaterialDirty.
+    // Package dirtiness instead means an applied asset has not yet been saved;
+    // comparing preview/original properties also includes editor-only changes.
+    // Query the bound predicate directly, without executing Apply or trusting
+    // a disabled command list (e.g. while another UI action is active).
+    const FUIAction* Apply = FMaterialEditorCommands::IsRegistered()
+        ? Editor->GetToolkitCommands()->GetActionForCommand(FMaterialEditorCommands::Get().Apply) : nullptr;
+    if (!Apply || !Apply->CanExecuteAction.IsBound())
+    {
+        Reason = FString::Printf(TEXT("Cannot verify pending Material Editor changes for %s; no editor copy will be replaced"), *Asset->GetPathName());
+        return false;
+    }
+    if (Apply->CanExecuteAction.Execute())
+    {
+        Reason = FString::Printf(TEXT("%s has unapplied Material Editor changes. Apply or explicitly discard those changes in the editor, then read the material again before retrying; the bridge will not discard them"), *Asset->GetPathName());
+        return false;
+    }
+    return true;
+}
+}
+
 FString ExactLoadedObjectPath(const FString& Path)
 {
     if (Path.IsEmpty()) return {};
@@ -95,22 +200,42 @@ void FocusMaterial(IAssetEditorInstance* Instance, UObject* Asset, const FDSHAss
     IMaterialEditor* Editor = static_cast<IMaterialEditor*>(Instance);
     TArray<UMaterialExpression*> Expressions;
     if (UMaterial* Material = Cast<UMaterial>(Editor->GetMaterialInterface()))
-        for (UMaterialExpression* Expression : Material->GetExpressions()) if (Expression) Expressions.AddUnique(Expression);
+    {
+        for (UMaterialExpression* Expression : Material->GetExpressions())
+            if (Expression && Expression->GraphNode) Expressions.AddUnique(Expression);
+        for (UMaterialExpressionComment* Comment : Material->GetExpressionCollection().EditorComments)
+            if (Comment && Comment->GraphNode) Expressions.AddUnique(Comment);
+    }
+    // Native node IDs use hyphenated GUIDs; other callers can supply compact
+    // GUIDs or original expression paths. Resolve identities, never navigate
+    // with an original-asset node pointer: it is not in the editor's graph.
+    TSet<FGuid> Ids;
+    for (const FString& Id : Hint.NodeIds)
+    {
+        FGuid Guid;
+        if (FGuid::Parse(Id, Guid)) Ids.Add(Guid);
+    }
+    auto ResolveOriginalId = [&](UMaterialExpression* Expression)
+    {
+        if (Expression && (Hint.NodeIds.Contains(Expression->GetName()) || Hint.NodeIds.Contains(Expression->GetPathName())))
+            Ids.Add(Expression->MaterialExpressionGuid);
+    };
     if (UMaterial* Material = Cast<UMaterial>(Asset))
     {
-        for (UMaterialExpression* MaterialNode : Material->GetExpressions()) if (MaterialNode) Expressions.AddUnique(MaterialNode);
+        for (UMaterialExpression* Expression : Material->GetExpressions()) ResolveOriginalId(Expression);
+        for (UMaterialExpressionComment* Comment : Material->GetExpressionCollection().EditorComments) ResolveOriginalId(Comment);
     }
     else if (UMaterialFunctionInterface* Function = Cast<UMaterialFunctionInterface>(Asset))
     {
-        for (UMaterialExpression* FunctionNode : Function->GetExpressions()) if (FunctionNode) Expressions.AddUnique(FunctionNode);
+        for (UMaterialExpression* Expression : Function->GetExpressions()) ResolveOriginalId(Expression);
     }
     TArray<UMaterialExpression*> Matches;
     for (UMaterialExpression* Expression : Expressions)
     {
-        if (!Hint.NodeIds.Contains(Expression->MaterialExpressionGuid.ToString())
+        if (!Ids.Contains(Expression->MaterialExpressionGuid)
             && !Hint.NodeIds.Contains(Expression->GetName())
             && !Hint.NodeIds.Contains(Expression->GetPathName())
-            && (!Expression->GraphNode || !Hint.NodeIds.Contains(Expression->GraphNode->NodeGuid.ToString()))) continue;
+            && !Ids.Contains(Expression->GraphNode->NodeGuid)) continue;
         Matches.Add(Expression);
     }
     if (Matches.IsEmpty() && Hint.Center.IsSet())
@@ -143,7 +268,99 @@ void FocusMaterial(IAssetEditorInstance* Instance, UObject* Asset, const FDSHAss
         if (!Closest || Distance < BestDistance) { Closest = Expression; BestDistance = Distance; }
     }
     if (Closest) Editor->JumpToExpression(Closest);
+    for (UMaterialExpression* Expression : Matches) Editor->AddToSelection(Expression);
 }
+}
+
+bool FDSHAssetPresentation::PrepareMaterialTransaction(FString& Reason)
+{
+    using namespace DSHMaterialPresentationPrivate;
+    Reason.Reset();
+    UTransBuffer* Buffer = GEditor ? Cast<UTransBuffer>(GEditor->Trans) : nullptr;
+    if (!Buffer)
+    {
+        Reason = TEXT("A native material edit requires the editor transaction buffer for safe Undo/Redo");
+        return false;
+    }
+    if (MaterialUndoSync.Transactor.Get() != Buffer)
+    {
+        MaterialUndoSync.Shutdown();
+        MaterialUndoSync.Transactor = Buffer;
+        MaterialUndoSync.StateHandle = Buffer->OnTransactionStateChanged().AddRaw(&MaterialUndoSync, &FMaterialUndoSync::StateChanged);
+    }
+    FlushPendingMaterialEditorSync();
+    return true;
+}
+
+void FDSHAssetPresentation::FlushPendingMaterialEditorSync()
+{
+    using namespace DSHMaterialPresentationPrivate;
+    if (GIsTransacting || !GEditor || GEditor->IsTransactionActive() || !MaterialUndoSync.Operations.IsEmpty()) return;
+    TArray<TWeakObjectPtr<UObject>> Assets = MoveTemp(MaterialUndoSync.PendingAssets);
+    MaterialUndoSync.PendingAssets.Reset();
+    const bool bNotifyViews = MaterialUndoSync.bNotifyViews;
+    MaterialUndoSync.bNotifyViews = false;
+    for (const TWeakObjectPtr<UObject>& Weak : Assets)
+    {
+        UObject* Asset = Weak.Get();
+        if (!Asset) continue;
+        FString Reason;
+        if (RefreshOpenMaterialEditors(Asset, Reason)) continue;
+        const FString Message = TEXT("DSH material Undo/Redo restored the asset, but its editor view was not synchronized: ") + Reason;
+        UE_LOG(LogTemp, Warning, TEXT("%s"), *Message);
+        if (FSlateApplication::IsInitialized())
+        {
+            FNotificationInfo Notification(FText::FromString(Message));
+            Notification.ExpireDuration = 8.0f;
+            FSlateNotificationManager::Get().AddNotification(Notification);
+        }
+    }
+    if (bNotifyViews && !GEditor->bSuspendBroadcastPostUndoRedo)
+    {
+        // These non-client notifications normally follow the suppressed client
+        // loop. Do not replay BroadcastPostUndoRedo (which would Apply copies).
+        GEditor->RedrawAllViewports(true);
+        FEditorDelegates::PostUndoRedo.Broadcast();
+    }
+}
+
+void FDSHAssetPresentation::ShutdownMaterialTransactions()
+{
+    DSHMaterialPresentationPrivate::MaterialUndoSync.Shutdown();
+}
+
+bool FDSHAssetPresentation::CanEditMaterialAsset(UObject* Asset, FString& Reason)
+{
+    Reason.Reset();
+    UAssetEditorSubsystem* Editors = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+    if (!Editors) return true; // Headless operation has no editable preview copy.
+    for (IAssetEditorInstance* Instance : Editors->FindEditorsForAsset(Asset))
+        if (Instance && Instance->GetEditorName() == TEXT("MaterialEditor")
+            && !DSHMaterialPresentationPrivate::CanRefresh(static_cast<IMaterialEditor*>(Instance), Asset, Reason)) return false;
+    return true;
+}
+
+bool FDSHAssetPresentation::RefreshOpenMaterialEditors(UObject* Asset, FString& Reason)
+{
+    Reason.Reset();
+    if (GIsTransacting || (GEditor && GEditor->IsTransactionActive()))
+    {
+        Reason = TEXT("The native edit committed, but its Material Editor refresh was skipped during an active transaction");
+        return false;
+    }
+    if (!CanEditMaterialAsset(Asset, Reason)) return false;
+    UAssetEditorSubsystem* Editors = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr;
+    if (!Editors) return true;
+    for (IAssetEditorInstance* Instance : Editors->FindEditorsForAsset(Asset))
+    {
+        if (!Instance || Instance->GetEditorName() != TEXT("MaterialEditor")) continue;
+        IMaterialEditor* Editor = static_cast<IMaterialEditor*>(Instance);
+        // Refresh can dispatch UI callbacks. Recheck each copy immediately
+        // before replacing it, even though all were checked before mutation.
+        if (!DSHMaterialPresentationPrivate::CanRefresh(Editor, Asset, Reason)) return false;
+        Editor->RefreshGraphFromOriginal();
+    }
+    return true;
 }
 
 UObject* FDSHAssetPresentation::ResolveSupportedTarget(const FString& ObjectPath)

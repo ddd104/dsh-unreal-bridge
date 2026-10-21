@@ -10,7 +10,7 @@ export function createStateService(bridge,guard,getConfig) {
     return {
       ...bridge.state(sessionId),executionSafety,
       settings:{nextTurnPending:settingsPending,nextTurnLimits:nextTurnSettings},
-      visualTools:{hostVersion:packageInfo.version,revision:2,analyses:['spatial','color_distribution'],signedZeroNormalized:true},
+      visualTools:{hostVersion:packageInfo.version,revision:3,analyses:['spatial','color_distribution','source_rgba'],signedZeroNormalized:true,imageAnalysisRequiresEditor:false},
     };
   };
 }

@@ -1,12 +1,19 @@
 import {BridgeError} from './protocol.mjs';
 import {randomUUID} from 'node:crypto';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import {isUnsafeWriteError} from './write-safety.mjs';
-import {RepairTracker,operationEvidence} from './repair-tracker.mjs';
+import {RepairTracker,operationEvidence,REPAIR_STOP_CONSTRAINTS,REPAIR_STOP_INSTRUCTION} from './repair-tracker.mjs';
 import {DEFAULTS} from './settings-spec.mjs';
 
 export const EXECUTION_LIMIT_DEFAULTS=Object.freeze(Object.fromEntries(Object.entries(DEFAULTS).filter(([key])=>key.startsWith('guard'))));
 const RECOVERY_TOOLS=new Set(['unreal_state','unreal_request_status']);
 const RECOVERY_CALL_LIMIT=2;
+const MATERIAL_EDITOR_CONFLICT_CONSTRAINTS=Object.freeze({
+  retainPendingEdits:true,
+  prohibitedWorkarounds:Object.freeze(['apply_pending_edits','discard_pending_edits','close_editor','switch_tools','replace_asset']),
+  independentWork:'reads_and_already_requested_unrelated_targets',
+  resumeSameTarget:'after_editor_conflict_resolved_and_fresh_read',
+});
 const nonnegative=value=>Number.isFinite(value)?Math.max(0,Math.min(Number.MAX_SAFE_INTEGER,Math.trunc(value))):0;
 const SHELL_TOOL=/(?:^|[_./-])(?:pwsh|powershell|bash|shell|exec_command|run_command|terminal|run_code)(?:$|[_./-])/i;
 const DIRECT_INPUT_API=/(?:\b(?:Get|Set)-Clipboard\b|\b(?:System\.)?Windows\.Forms\.Clipboard\b|\b(?:mouse_event|SetCursorPos|SendInput)\s*\(|\bDllImport\s*\(\s*['"]user32(?:\.dll)?['"]|\b(?:windll\s*\.\s*user32|user32\s*(?:\.|::))|\b(?:WinDLL|LoadLibrary|CDLL)\s*\(\s*['"]user32(?:\.dll)?['"]|\bpyautogui\s*\.\s*(?:click|doubleClick|rightClick|moveTo|moveRel|mouseDown|mouseUp|dragTo|dragRel|press|hotkey)\s*\(|\bpynput\s*\.\s*mouse\b|\bpyperclip\s*\.\s*(?:copy|paste)\s*\()/i;
@@ -53,13 +60,14 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     const limits={...EXECUTION_LIMIT_DEFAULTS};
     for(const key of Object.keys(EXECUTION_LIMIT_DEFAULTS)){
       if(config?.[key]!==undefined)limits[key]=config[key];
-      const minimum=key==='guardMaxRepairAttempts'?0:1;
+      const minimum=['guardMaxRepairAttempts','guardMaxMalformedRetries'].includes(key)?0:1;
       if(!Number.isSafeInteger(limits[key])||limits[key]<minimum)throw new TypeError(`${key} must be a ${minimum?'positive':'nonnegative'} safe integer`);
     }
     return Object.freeze(limits);
   }
   readLimits();
   const rounds=new Map(),removers=[],executions=new WeakMap(),operations=new WeakMap();
+  const executing=new AsyncLocalStorage();
   let disposed=false;
   const service=key=>{
     try{return typeof options.getService==='function'?options.getService(key):ctx.get?.(key)??ctx[key];}
@@ -71,9 +79,35 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     try{options.onChange?.(state.sessionId,status(state.sessionId));}catch(error){service('logger')?.warn?.(`Unreal execution status notification failed: ${error.message}`);}
   }
   function clearTimer(state){if(state.timer){clearTimeout(state.timer);state.timer=undefined;}}
+  function armTimer(state){
+    clearTimer(state);
+    state.timer=setTimeout(()=>{
+      if(rounds.get(state.sessionId)===state&&state.active&&!state.ended&&!state.halted&&state.pausedAt===null)halt(state,`Unreal 任务已超过 ${state.limits.guardTimeoutMs/1000} 秒，已停止本轮执行，请检查已完成的修改后重新发起任务。`);
+    },Math.max(0,state.deadlineAt-Date.now()));
+    state.timer.unref?.();
+  }
+  function pausedTime(state,now=Date.now()){
+    return state.pausedMs+(state.pausedAt===null?0:nonnegative(now-state.pausedAt));
+  }
+  function updateWaitTimer(state){
+    if(disposed||!state.active||state.ended||state.halted||rounds.get(state.sessionId)!==state)return;
+    const waiting=state.waits.size>0&&[...state.running].every(record=>record.waits>0);
+    if(waiting===(state.pausedAt!==null))return;
+    const now=Date.now();
+    if(waiting){
+      // Starting a question at an exhausted deadline cannot extend the budget.
+      if(now>=state.deadlineAt){halt(state,`Unreal 任务已超过 ${state.limits.guardTimeoutMs/1000} 秒，已停止本轮执行。`);return;}
+      clearTimer(state);state.pausedAt=now;
+    }else{
+      const duration=nonnegative(now-state.pausedAt);
+      state.pausedMs+=duration;state.deadlineAt+=duration;state.pausedAt=null;
+      armTimer(state);
+    }
+    notify(state);
+  }
   function create(sessionId,turn,boundary,boundarySource){
     const old=rounds.get(sessionId);if(old)clearTimer(old);
-    const state={sessionId,turn:turn??null,boundary,boundarySource,active:false,ended:false,endedAt:null,limits:null,repairs:null,halted:false,reason:null,calls:0,errors:0,lastError:null,errorNoticeCount:0,currentStep:0,activationStep:0,steps:0,roots:new Set(),failedRoots:new Set(),tokenRoots:new Map(),budgetExhausted:false,exhaustedBy:null,summaryOnly:false,recoveryTokens:new Set(),recoveryStep:null,summaryStep:null};
+    const state={sessionId,turn:turn??null,boundary,boundarySource,active:false,ended:false,endedAt:null,limits:null,repairs:null,halted:false,reason:null,calls:0,errors:0,lastError:null,errorNoticeCount:0,currentStep:0,activationStep:0,steps:0,roots:new Set(),failedRoots:new Set(),tokenRoots:new Map(),budgetExhausted:false,exhaustedBy:null,summaryOnly:false,recoveryTokens:new Set(),recoveryStep:null,summaryStep:null,pausedAt:null,pausedMs:0,waits:new Set(),running:new Set()};
     rounds.delete(sessionId);rounds.set(sessionId,state);
     // Preserve all live turns, while bounding retained completed/idle history.
     for(const [key,prior] of rounds){
@@ -131,10 +165,7 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
   function activate(state){
     const limits=state.limits=readLimits();state.repairs=new RepairTracker(limits);
     state.active=true;state.activationStep=state.currentStep;state.steps=1;state.startedAt=Date.now();state.deadlineAt=state.startedAt+limits.guardTimeoutMs;
-    state.timer=setTimeout(()=>{
-      if(rounds.get(state.sessionId)===state)halt(state,`Unreal 任务已超过 ${limits.guardTimeoutMs/1000} 秒，已停止本轮执行，请检查已完成的修改后重新发起任务。`);
-    },limits.guardTimeoutMs);
-    state.timer.unref?.();
+    armTimer(state);updateWaitTimer(state);
     notify(state);
   }
   function rootOf(state,exec){
@@ -153,7 +184,7 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     if(!state.active&&/^unreal_/.test(exec.name??''))activate(state);
     if(!state.active)return;
     const limits=state.limits;
-    if(Date.now()>=state.deadlineAt)halt(state,`Unreal 任务已超过 ${limits.guardTimeoutMs/1000} 秒，已停止本轮执行。`);
+    if(remaining(state).timeMs===0)halt(state,`Unreal 任务已超过 ${limits.guardTimeoutMs/1000} 秒，已停止本轮执行。`);
     if(!state.halted&&prohibitedInput(exec))throw new BridgeError('MCP_POLICY_BLOCKED','Unreal 任务禁止通过终端调用真实鼠标或剪贴板接口；此调用未执行，请改用允许的编辑器结构化工具。',{execution:'not_started',retryable:false,reason:'desktop_input'});
     if(state.halted)throw haltedError(state);
     if(state.budgetExhausted){
@@ -209,8 +240,11 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     const unsafe=isUnsafeWriteError(body);
     if(!state.failedRoots.has(root)){
       state.failedRoots.add(root);state.errors++;
-      const recovery=unsafe?'stop_writes':['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN'].includes(code)?'check_request_status':problem?.status==='blocked'?'stop_problem':details?.rollback==='not_available'?'verify_before_retry':code==='MCP_POLICY_BLOCKED'||details?.retryable===false&&details?.rollback!=='restored'?'choose_supported_operation':'correct_and_retry';
-      state.lastError={code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',rollback:unsafe?'failed':details?.rollback??null,recovery,...(problem?{problem}:{})};
+      const recovery=unsafe?'stop_writes':['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN'].includes(code)?'check_request_status':code==='MATERIAL_EDITOR_CONFLICT'?'resolve_editor_conflict':problem?.status==='blocked'?'stop_problem':details?.rollback==='not_available'?'verify_before_retry':code==='MCP_POLICY_BLOCKED'||details?.retryable===false&&details?.rollback!=='restored'?'choose_supported_operation':'correct_and_retry';
+      const operation=operations.get(exec);
+      const recoveryConstraints=recovery==='stop_problem'?REPAIR_STOP_CONSTRAINTS:recovery==='resolve_editor_conflict'
+        ?{...MATERIAL_EDITOR_CONFLICT_CONSTRAINTS,...(operation?.target?{target:operation.target}:{})}:null;
+      state.lastError={code:code??'ERROR',message:typeof error?.message==='string'?error.message:'Tool execution failed',rollback:unsafe?'failed':details?.rollback??null,recovery,...(problem?{problem}:{}),...(recoveryConstraints?{recoveryConstraints}:{})};
     }
     if(unsafe){
       // A late result from an admitted parallel call may reveal unsafe state
@@ -223,7 +257,7 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     notify(state);
     return value;
   }
-  function on(name,callback){const remove=ctx.on?.(name,callback);if(typeof remove==='function')removers.push(remove);}
+  function on(name,callback,settings){const remove=ctx.on?.(name,callback,settings);if(typeof remove==='function')removers.push(remove);}
   if(typeof ctx.on==='function'){
     on('session/event',(session,event)=>{
       if(disposed)return;
@@ -246,6 +280,37 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
       return next();
     });
     on('tools/post-execute',async(exec,result,next)=>{const decision=await next();after(exec,result);return decision;});
+    on('tools/execute',async(exec,next)=>{
+      const state=executions.get(exec)?.state??stateFor(exec);
+      if(!state||state.ended||state.halted)return next();
+      const record={state,waits:0};
+      const parents=executing.getStore()??[];
+      state.running.add(record);updateWaitTimer(state);
+      try{return await executing.run([...parents,record],next);}
+      finally{state.running.delete(record);updateWaitTimer(state);}
+    },{prepend:true});
+    // This trusted seam runs after question and live-agent validation, before
+    // an answerer may consume the waterfall without calling next(). Tool names
+    // or model-controlled arguments alone must never suspend the deadline.
+    on('user-questions/request',async(request,next)=>{
+      const stack=executing.getStore()??[],sessionId=request.agent?.session?.id;
+      const state=stack.findLast(record=>record.state.sessionId===sessionId)?.state??rounds.get(sessionId);
+      if(!state||rounds.get(sessionId)!==state||state.ended||state.halted||request.signal?.aborted)return next();
+      const records=stack.filter(record=>record.state===state&&state.running.has(record));
+      const wait={};let released=false;
+      const release=()=>{
+        if(released)return;released=true;
+        request.signal?.removeEventListener('abort',release);
+        state.waits.delete(wait);
+        for(const record of records)record.waits--;
+        updateWaitTimer(state);
+      };
+      state.waits.add(wait);
+      for(const record of records)record.waits++;
+      request.signal?.addEventListener('abort',release,{once:true});
+      updateWaitTimer(state);
+      try{return await next();}finally{release();}
+    },{prepend:true});
     on('system-prompt/assemble',async(_assembly,context,next)=>{
       const assembled=await next();
       const state=stateFor({agent:context.agent??context.scope});
@@ -293,8 +358,9 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
             const parts=[];
             if(state.errors>state.errorNoticeCount){
               const error=state.lastError;
-              const instruction=error.recovery==='stop_problem'?'该目标的当前操作已达到单问题修复限制；停止重试这一项，说明现状，可以继续读取诊断、查询原请求状态或处理其他目标与独立操作。':error.recovery==='verify_before_retry'?'该写操作未提供回滚保证，先读取目标当前状态，确认是否已部分生效，再根据错误修正操作；不要原样盲重试。':error.recovery==='check_request_status'?'先使用原 requestId 查询 unreal_request_status，确认结果；不要用新编号重复可能已经执行的写入。':error.recovery==='choose_supported_operation'?'此操作不受支持或已被策略拒绝；改用允许的操作继续独立工作，不得换脚本、桌面输入或调度器绕过限制。':'根据原始错误读取必要信息、修正参数或操作后继续验证；不要重复无变化的失败请求。';
-              parts.push(`Unreal 工具失败（${error.code}）：${error.message.slice(0,1200)}。${instruction} 已累计 ${state.errors}/${limits.guardMaxErrors} 次错误，成功调用不会清零；确定失败并完成核实后的修正写入使用新的 requestId。`);
+              const instruction=error.recovery==='stop_problem'?`该目标的当前操作已达到单问题修复限制；${REPAIR_STOP_INSTRUCTION}`:error.recovery==='resolve_editor_conflict'?`材质编辑器存在未应用的用户修改，或无法可靠检查其状态。保留这些修改；说明错误中的具体目标${error.recoveryConstraints?.target?`（${error.recoveryConstraints.target}）`:''}，等待用户处理现有编辑状态后重新读取目标，再继续当前写入。不得自动 Apply、丢弃修改、关闭编辑器、换工具或创建替代资产绕过冲突。可以继续读取诊断和处理其他已授权且无关的目标。`:error.recovery==='verify_before_retry'?'该写操作未提供回滚保证，先读取目标当前状态，确认是否已部分生效，再根据错误修正操作；不要原样盲重试。':error.recovery==='check_request_status'?'先使用原 requestId 查询 unreal_request_status，确认结果；不要用新编号重复可能已经执行的写入。':error.recovery==='choose_supported_operation'?'此操作不受支持或已被策略拒绝；改用允许的操作继续独立工作，不得换脚本、桌面输入或调度器绕过限制。':'根据原始错误读取必要信息、修正参数或操作后继续验证；不要重复无变化的失败请求。';
+              const correctionIdentity=['correct_and_retry','verify_before_retry'].includes(error.recovery)?' 确定失败并完成核实后的修正写入使用新的 requestId。':'';
+              parts.push(`Unreal 工具失败（${error.code}）：${error.message.slice(0,1200)}。${instruction} 已累计 ${state.errors}/${limits.guardMaxErrors} 次错误，成功调用不会清零。${correctionIdentity}`);
               state.errorNoticeCount=state.errors;
             }
             if(info.warning)parts.push(info.warning);
@@ -309,7 +375,7 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
   function remaining(state){
     const limits=state.limits??readLimits();
     const now=state.stoppedAt??state.endedAt??Date.now();
-    return {toolCalls:nonnegative(limits.guardMaxToolCalls-state.calls),steps:nonnegative(limits.guardMaxSteps-state.steps),errors:nonnegative(limits.guardMaxErrors-state.errors),timeMs:state.startedAt===undefined?limits.guardTimeoutMs:nonnegative(state.deadlineAt-now),recoveryCalls:state.summaryOnly?0:nonnegative(RECOVERY_CALL_LIMIT-state.recoveryTokens.size)};
+    return {toolCalls:nonnegative(limits.guardMaxToolCalls-state.calls),steps:nonnegative(limits.guardMaxSteps-state.steps),errors:nonnegative(limits.guardMaxErrors-state.errors),timeMs:state.startedAt===undefined?limits.guardTimeoutMs:nonnegative(state.deadlineAt-(state.pausedAt??now)),recoveryCalls:state.summaryOnly?0:nonnegative(RECOVERY_CALL_LIMIT-state.recoveryTokens.size)};
   }
   function status(sessionId){
     const state=rounds.get(sessionId);if(!state)return null;
@@ -318,9 +384,10 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     const left=remaining(state);
     const near=active&&(calls/limits.guardMaxToolCalls>=0.8||steps/limits.guardMaxSteps>=0.8||errors/limits.guardMaxErrors>=0.8||left.timeMs/limits.guardTimeoutMs<=0.2);
     const warning=state.ended?null:state.budgetExhausted?`${reason} 请准备总结当前结果与未完成部分。`:near?'Unreal 本轮预算接近上限，请优先完成当前验证，并准备报告未完成部分。':null;
-    const elapsedMs=startedAt===undefined?0:nonnegative((state.stoppedAt??state.endedAt??Date.now())-startedAt);
+    const now=state.stoppedAt??state.endedAt??Date.now(),pausedMs=pausedTime(state,now);
+    const elapsedMs=startedAt===undefined?0:nonnegative(now-startedAt-pausedMs);
     const repairs=state.repairs?.status()??{issues:[],total:0,attemptsUsed:0,failures:0,activeCount:0,blockedCount:0,resolvedCount:0,hiddenCount:0,capacityReached:false};
-    return {turn,boundarySource,active,halted,reason,calls,toolCalls:calls,errors,lastError:state.lastError,steps,startedAt:startedAt??null,deadlineAt:deadlineAt??null,endedAt:state.endedAt,elapsedMs,limits:{...limits},repairs,crossToolEnforcement:typeof ctx.on==='function',phase:state.ended?'completed':halted?'halted':state.budgetExhausted?'summary':warning?'warning':active?'active':'idle',budgetExhausted:state.budgetExhausted,exhaustedBy:state.exhaustedBy,summaryOnly:state.summaryOnly,recoveryCallsUsed:state.recoveryTokens.size,remaining:left,warning};
+    return {turn,boundarySource,active,halted,reason,calls,toolCalls:calls,errors,lastError:state.lastError,steps,startedAt:startedAt??null,deadlineAt:deadlineAt??null,endedAt:state.endedAt,elapsedMs,pausedMs,waitingForUser:state.pausedAt!==null&&!state.ended&&!state.halted,limits:{...limits},repairs,crossToolEnforcement:typeof ctx.on==='function',phase:state.ended?'completed':halted?'halted':state.budgetExhausted?'summary':warning?'warning':active?'active':'idle',budgetExhausted:state.budgetExhausted,exhaustedBy:state.exhaustedBy,summaryOnly:state.summaryOnly,recoveryCallsUsed:state.recoveryTokens.size,remaining:left,warning};
   }
   function setOperation(exec,evidence){
     if(!exec||typeof exec!=='object')throw new TypeError('Execution must be a host object');
@@ -330,6 +397,7 @@ export function registerExecutionGuard(ctx,configOrGetter={},options={}){
     if(disposed)return;disposed=true;
     for(const state of rounds.values())clearTimer(state);
     for(const remove of removers.splice(0))remove();
+    executing.disable();
     rounds.clear();
   }
   return {before,after,dispose,status,setOperation};

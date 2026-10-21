@@ -30,6 +30,7 @@ struct FCheck
     FString Code, Message;
     TArray<FTarget> Targets;
     int32 Visited = 0;
+    bool bResolveOnly = false;
 
     bool Fail(const FString& Suffix, const FString& Text, const FString& Parameter = FString(),
         const FString& Path = FString(), const FString& Expected = FString(), const FString& Actual = FString())
@@ -173,7 +174,7 @@ struct FCheck
             }
             FString Title;
             if (Schema) Schema->TryGetStringField(TEXT("title"), Title);
-            if (Title == TEXT("PinID"))
+            if (Title == TEXT("PinID") && !bResolveOnly)
             {
                 const TSharedPtr<FJsonObject>* NodeRef = nullptr;
                 FString NodePath, Direction;
@@ -306,13 +307,11 @@ TSharedPtr<FJsonObject> SchemaFor(const FString& Toolset, const FString& Leaf, F
     Check.Fail(TEXT("SCHEMA_UNAVAILABLE"), TEXT("The exact enabled tool and input schema could not be found in the current native catalog."));
     return nullptr;
 }
-}
 
-bool FDSHMcpTargetValidation::Validate(const FString& ToolName, const TSharedPtr<FJsonObject>& ToolArguments,
-    TSharedPtr<FJsonObject>& Details, FString& Code, FString& Message)
+bool CheckCall(const FString& ToolName, const TSharedPtr<FJsonObject>& ToolArguments, FCheck& Check,
+    FString& SemanticToolset, FString& SemanticLeaf, bool bOperationContext = false)
 {
-    check(IsInGameThread());
-    FCheck Check;
+    Check.bResolveOnly = bOperationContext;
     FString Toolset, Leaf = ToolName;
     auto Arguments = ToolArguments;
     bool bValid = Arguments.IsValid();
@@ -329,18 +328,241 @@ bool FDSHMcpTargetValidation::Validate(const FString& ToolName, const TSharedPtr
     if (!bValid && Check.Code.IsEmpty()) Check.Fail(TEXT("REFERENCE_SHAPE"), TEXT("The MCP dispatch arguments are invalid."));
     if (bValid)
     {
-        auto Schema = SchemaFor(Toolset, Leaf, Check);
-        FString SemanticToolset = Toolset, SemanticLeaf = Leaf;
+        SemanticToolset = Toolset;
+        SemanticLeaf = Leaf;
         int32 LastDot = INDEX_NONE;
         if (SemanticToolset.IsEmpty() && SemanticLeaf.FindLastChar(TEXT('.'), LastDot))
         {
             SemanticToolset = SemanticLeaf.Left(LastDot);
             SemanticLeaf = SemanticLeaf.Mid(LastDot + 1);
         }
+        if (bOperationContext && (SemanticLeaf.IsEmpty() || SemanticLeaf.Contains(TEXT(".")) ||
+            (SemanticToolset != TEXT("editor_toolset.toolsets.blueprint.BlueprintTools") &&
+             SemanticToolset != TEXT("editor_toolset.toolsets.object.ObjectTools"))))
+            return Check.Fail(TEXT("UNSUPPORTED"), TEXT("Operation context only supports exact BlueprintTools and ObjectTools leaf tools."));
+        auto Schema = SchemaFor(Toolset, Leaf, Check);
         bValid = Schema.IsValid() && Check.Walk(MakeShared<FJsonValueObject>(Arguments), Schema, FString()) && Check.Ownership(SemanticToolset, SemanticLeaf);
     }
+    return bValid;
+}
+
+// JSON object member order is not part of the call identity. Preserve every
+// value (including caller annotations), sorting only object keys.
+FString CanonicalValue(const TSharedPtr<FJsonValue>& Value)
+{
+    if (Value->Type == EJson::Object)
+    {
+        TArray<FString> Keys;
+        for (const auto& Entry : Value->AsObject()->Values) Keys.Add(FString(*Entry.Key));
+        Keys.Sort();
+        FString Result = TEXT("{");
+        for (const FString& Key : Keys)
+            Result += CanonicalValue(MakeShared<FJsonValueString>(Key)) + TEXT(":") + CanonicalValue(Value->AsObject()->TryGetField(Key)) + TEXT(",");
+        return Result + TEXT("}");
+    }
+    if (Value->Type == EJson::Array)
+    {
+        FString Result = TEXT("[");
+        for (const auto& Entry : Value->AsArray()) Result += CanonicalValue(Entry) + TEXT(",");
+        return Result + TEXT("]");
+    }
+    auto Wrapper = MakeShared<FJsonObject>();
+    Wrapper->SetField(TEXT("v"), Value);
+    FString Result;
+    FJsonSerializer::Serialize(Wrapper, TJsonWriterFactory<>::Create(&Result));
+    return Result;
+}
+
+bool ContextFailure(const TCHAR* Suffix, const TCHAR* Text, TSharedPtr<FJsonObject>& Details, FString& Code, FString& Message)
+{
+    Code = FString(TEXT("MCP_OPERATION_")) + Suffix;
+    Message = Text;
+    Details = MakeShared<FJsonObject>();
+    Details->SetStringField(TEXT("execution"), TEXT("not_started"));
+    Details->SetBoolField(TEXT("retryable"), true);
+    return false;
+}
+}
+
+bool FDSHMcpTargetValidation::Validate(const FString& ToolName, const TSharedPtr<FJsonObject>& ToolArguments,
+    TSharedPtr<FJsonObject>& Details, FString& Code, FString& Message)
+{
+    check(IsInGameThread());
+    FCheck Check;
+    FString Toolset, Leaf;
+    const bool bValid = CheckCall(ToolName, ToolArguments, Check, Toolset, Leaf);
     Details = Check.Details;
     Code = Check.Code;
     Message = Check.Message;
     return bValid;
+}
+
+bool FDSHMcpOperationContexts::Inspect(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments, FRecord& Record,
+    TSharedPtr<FJsonObject>& Details, FString& Code, FString& Message)
+{
+    check(IsInGameThread());
+    FCheck Check;
+    FString Toolset, Leaf;
+    if (!CheckCall(ToolName, Arguments, Check, Toolset, Leaf, true))
+    {
+        Details = Check.Details; Code = Check.Code; Message = Check.Message;
+        return false;
+    }
+    Record.CallName = ToolName;
+    Record.CanonicalToolName = Toolset + TEXT(".") + Leaf;
+    Record.Arguments = CanonicalValue(MakeShared<FJsonValueObject>(Arguments));
+    Record.Bytes = Record.Arguments.GetAllocatedSize();
+    auto Remember = [&Record](UObject* Object)
+    {
+        if (!Record.Identities.ContainsByPredicate([Object](const FIdentity& Entry) { return Entry.Object.Get() == Object; }))
+        {
+            const FString Path = Object->GetPathName();
+            Record.Identities.Add({Path, Object});
+            Record.Bytes += Path.GetAllocatedSize() + sizeof(FIdentity);
+        }
+    };
+    for (const FTarget& Target : Check.Targets)
+    {
+        // Registry metadata cannot bind the identity of an unloaded object.
+        if (!IsValid(Target.Object))
+            return ContextFailure(TEXT("TARGET_UNLOADED"), TEXT("Operation context requires already-loaded target references; it does not load assets."), Details, Code, Message);
+        Remember(Target.Object);
+        if (Target.bClassReference) continue;
+        // Values assigned to properties are references, not objects being edited.
+        if (Toolset == TEXT("editor_toolset.toolsets.object.ObjectTools") && Target.Parameter != TEXT("/instance")) continue;
+        UBlueprint* Owner = Cast<UBlueprint>(Target.Object);
+        if (Owner && Toolset == TEXT("editor_toolset.toolsets.object.ObjectTools") &&
+            (Leaf == TEXT("get_properties") || Leaf == TEXT("set_properties") || Leaf == TEXT("reset_properties")))
+        {
+            UClass* GeneratedClass = Owner->GeneratedClass;
+            UObject* DefaultObject = GeneratedClass ? GeneratedClass->GetDefaultObject(false) : nullptr;
+            if (!IsValid(GeneratedClass) || !IsValid(DefaultObject) || GeneratedClass->ClassGeneratedBy != Owner)
+                return ContextFailure(TEXT("TARGET_UNLOADED"), TEXT("This ObjectTools operation targets a Blueprint's existing default object; preflight does not create one."), Details, Code, Message);
+            Remember(GeneratedClass);
+            Remember(DefaultObject);
+        }
+        UEdGraph* Graph = Cast<UEdGraph>(Target.Object);
+        if (UEdGraphNode* Node = Cast<UEdGraphNode>(Target.Object)) Graph = Node->GetGraph();
+        if (Graph)
+        {
+            Remember(Graph);
+            Owner = Graph->GetTypedOuter<UBlueprint>();
+            if (Owner)
+            {
+                if (!IsValid(Owner))
+                    return ContextFailure(TEXT("OWNER_INVALID"), TEXT("The graph's Blueprint owner is no longer live."), Details, Code, Message);
+                TArray<UEdGraph*> Inventory;
+                Owner->GetAllGraphs(Inventory);
+                if (!Inventory.Contains(Graph))
+                    return ContextFailure(TEXT("OWNER_INVALID"), TEXT("The graph is absent from its actual Blueprint's live graph inventory."), Details, Code, Message);
+            }
+        }
+        if (!Owner && Toolset == TEXT("editor_toolset.toolsets.object.ObjectTools"))
+        {
+            UClass* GeneratedClass = Cast<UClass>(Target.Object);
+            if (!GeneratedClass && Target.Object->HasAnyFlags(RF_ClassDefaultObject) &&
+                Target.Object->GetClass()->GetDefaultObject(false) == Target.Object)
+                GeneratedClass = Target.Object->GetClass();
+            if (GeneratedClass)
+            {
+                UBlueprint* ClassOwner = Cast<UBlueprint>(GeneratedClass->ClassGeneratedBy);
+                if (ClassOwner)
+                {
+                    if (!IsValid(ClassOwner) || (ClassOwner->GeneratedClass != GeneratedClass && ClassOwner->SkeletonGeneratedClass != GeneratedClass))
+                        return ContextFailure(TEXT("OWNER_INVALID"), TEXT("The class is absent from its actual Blueprint's generated class inventory."), Details, Code, Message);
+                    Owner = ClassOwner;
+                    Remember(GeneratedClass);
+                }
+            }
+        }
+        if (Owner)
+        {
+            if (!IsValid(Owner)) return ContextFailure(TEXT("OWNER_INVALID"), TEXT("The Blueprint owner is no longer live."), Details, Code, Message);
+            Remember(Owner);
+            if (!Record.Owners.ContainsByPredicate([Owner](const FIdentity& Entry) { return Entry.Object.Get() == Owner; }))
+            {
+                const FString Path = Owner->GetPathName();
+                Record.Owners.Add({Path, Owner});
+                Record.Bytes += Path.GetAllocatedSize() + sizeof(FIdentity);
+            }
+        }
+    }
+    if (Record.Identities.Num() > 4096 || Record.Bytes > 8 * 1024 * 1024)
+        return ContextFailure(TEXT("LIMIT"), TEXT("Operation context exceeds its bounded identity or argument capacity."), Details, Code, Message);
+    Details.Reset(); Code.Reset(); Message.Reset();
+    return true;
+}
+
+TSharedPtr<FJsonObject> FDSHMcpOperationContexts::Prepare(const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments,
+    TSharedPtr<FJsonObject>& Details, FString& Code, FString& Message)
+{
+    FRecord Record;
+    if (!Inspect(ToolName, Arguments, Record, Details, Code, Message)) return nullptr;
+    const double Now = FPlatformTime::Seconds();
+    for (auto It = Records.CreateIterator(); It; ++It)
+        if (Now - It.Value().Created >= 120.0) It.RemoveCurrent();
+    int64 TotalBytes = Record.Bytes;
+    for (const auto& Entry : Records) TotalBytes += Entry.Value.Bytes;
+    while (!Records.IsEmpty() && (Records.Num() >= 64 || TotalBytes > 16 * 1024 * 1024))
+    {
+        FString Oldest;
+        double OldestTime = TNumericLimits<double>::Max();
+        for (const auto& Entry : Records)
+            if (Entry.Value.Created < OldestTime) { Oldest = Entry.Key; OldestTime = Entry.Value.Created; }
+        TotalBytes -= Records.FindChecked(Oldest).Bytes;
+        Records.Remove(Oldest);
+    }
+    const FString Token = FGuid::NewGuid().ToString(EGuidFormats::DigitsWithHyphens);
+    auto Result = MakeShared<FJsonObject>();
+    Result->SetBoolField(TEXT("verified"), true);
+    Result->SetStringField(TEXT("toolName"), Record.CanonicalToolName);
+    Result->SetStringField(TEXT("token"), Token);
+    TArray<TSharedPtr<FJsonValue>> Owners;
+    for (const FIdentity& Owner : Record.Owners)
+    {
+        auto Value = MakeShared<FJsonObject>();
+        Value->SetStringField(TEXT("path"), Owner.Path);
+        Value->SetStringField(TEXT("classPath"), Owner.Object->GetClass()->GetPathName());
+        Owners.Add(MakeShared<FJsonValueObject>(Value));
+    }
+    Result->SetArrayField(TEXT("blueprintOwners"), Owners);
+    Record.Created = Now;
+    Records.Add(Token, MoveTemp(Record));
+    return Result;
+}
+
+bool FDSHMcpOperationContexts::Verify(const FString& Token, const FString& ToolName, const TSharedPtr<FJsonObject>& Arguments,
+    bool bMutation, TSharedPtr<FJsonObject>& Details, FString& Code, FString& Message)
+{
+    check(IsInGameThread());
+    const FRecord* Previous = Records.Find(Token);
+    if (!Previous) return ContextFailure(TEXT("TOKEN_INVALID"), TEXT("The operation token is unknown, consumed, or belongs to another connection; repeat preflight."), Details, Code, Message);
+    if (FPlatformTime::Seconds() - Previous->Created >= 120.0)
+    {
+        Records.Remove(Token);
+        return ContextFailure(TEXT("TOKEN_EXPIRED"), TEXT("The operation token expired; repeat preflight."), Details, Code, Message);
+    }
+    FRecord Current;
+    if (!Inspect(ToolName, Arguments, Current, Details, Code, Message)) return false;
+    if (Previous->CallName != Current.CallName || Previous->CanonicalToolName != Current.CanonicalToolName || Previous->Arguments != Current.Arguments)
+        return ContextFailure(TEXT("CALL_MISMATCH"), TEXT("The call name or arguments changed after operation preflight."), Details, Code, Message);
+    auto SameIdentities = [](const TArray<FIdentity>& Before, const TArray<FIdentity>& After)
+    {
+        if (Before.Num() != After.Num()) return false;
+        for (const FIdentity& Entry : Before)
+        {
+            UObject* Object = Entry.Object.Get();
+            if (!IsValid(Object) || Object->GetPathName() != Entry.Path ||
+                !After.ContainsByPredicate([&Entry, Object](const FIdentity& Other) { return Other.Path == Entry.Path && Other.Object.Get() == Object; })) return false;
+        }
+        return true;
+    };
+    if (!SameIdentities(Previous->Identities, Current.Identities) || !SameIdentities(Previous->Owners, Current.Owners))
+        return ContextFailure(TEXT("TARGET_CHANGED"), TEXT("A resolved target, graph, or Blueprint owner moved, expired, or was replaced since preflight."), Details, Code, Message);
+    if (bMutation && Current.Owners.Num() > 1)
+        return ContextFailure(TEXT("MULTIPLE_OWNERS"), TEXT("A write cannot span multiple Blueprint owners; split it into separately verified operations."), Details, Code, Message);
+    // The ownership preflight intentionally allows a stale pin index/direction
+    // so the host can attribute a failed repair to its real owner. Execution
+    // still requires the original strict schema/pin validation.
+    return FDSHMcpTargetValidation::Validate(ToolName, Arguments, Details, Code, Message);
 }

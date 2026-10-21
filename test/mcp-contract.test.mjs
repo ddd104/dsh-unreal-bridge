@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure} from '../src/mcp-contract.mjs';
+import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,MATERIAL_TOOLSET,MATERIAL_READ_TOOLS} from '../src/mcp-contract.mjs';
 
 const DATA_TABLE='editor_toolset.toolsets.data_table.DataTableTools';
 const description=tools=>({content:[{type:'text',text:JSON.stringify({tools})}]});
@@ -103,6 +103,18 @@ test('UE errors retain their original text and result for read and writing failu
   }
   assert.equal(mcpFailure({ok:false,error:{message:'原始错误'}}).message,'原始错误');
   assert.throws(()=>describeTools(result,DATA_TABLE),error=>error.code==='MCP_READ_ERROR'&&error.details.ueResult===result);
+});
+
+test('only audited MaterialTools queries bypass mutation coordination',()=>{
+  assert.equal(MATERIAL_READ_TOOLS.length,8);
+  for(const name of MATERIAL_READ_TOOLS){
+    assert.equal(isReadOnlyMcpCall({name,arguments:{}}),true);
+    assert.equal(isReadOnlyMcpCall({name:'call_tool',arguments:{toolset_name:MATERIAL_TOOLSET,tool_name:name.slice(MATERIAL_TOOLSET.length+1)}}),true);
+  }
+  for(const leaf of ['recompile','layout_expressions','delete_unused_expressions','rename_parameter_group','add_expression','connect_expressions','get_and_mutate']){
+    assert.equal(isReadOnlyMcpCall({name:`${MATERIAL_TOOLSET}.${leaf}`,arguments:{readOnlyHint:true}}),false);
+  }
+  assert.equal(isReadOnlyMcpCall({name:'other.MaterialTools.get_expressions',arguments:{}}),false);
 });
 
 test('explicit rollback failures and write lock codes survive MCP error envelopes',()=>{

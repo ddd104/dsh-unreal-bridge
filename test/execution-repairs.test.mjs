@@ -47,15 +47,62 @@ test('single-problem denial preserves global error allowance and independent wor
   const denied=f.exec();f.attach(denied);
   const decision=await f.hooks.get('tools/pre-execute')(denied,async()=>({kind:'allow'}));
   assert.equal(decision.kind,'deny');assert.equal(decision.info.code,'REPAIR_BUDGET_EXHAUSTED');
+  assert.equal(decision.info.details.recovery,'stop_problem');
+  assert.equal(decision.info.details.recoveryConstraints.independentWork,'already_requested_unrelated_work');
   f.guard.after(denied,{isError:true,error:{message:decision.reason,info:decision.info}});
   assert.equal(f.guard.status('chat').errors,1);assert.equal(f.guard.status('chat').budgetExhausted,false);
   assert.equal(f.guard.status('chat').lastError.recovery,'stop_problem');
+  assert.equal(f.guard.status('chat').lastError.recoveryConstraints.retainTarget,true);
   const notice=await f.hooks.get('agent/pre-step')({agent:f.agent,step:2},async()=>({kind:'enter',messages:[]}));
   assert.match(notice.messages.at(-1).content[0].text,/停止重试这一项.*其他目标/);
+  assert.match(notice.messages.at(-1).content[0].text,/不得靠换名新建、复制或重建替代资产/);
+  assert.doesNotMatch(notice.messages.at(-1).content[0].text,/修正写入使用新的 requestId/);
   const independent=f.exec();f.attach(independent,{target:'/Game/BP_Other'});f.guard.before(independent);
   const read=f.exec('unreal_read_blueprint');f.attach(read,{kind:'read'});f.guard.before(read);
   const status=f.exec('unreal_request_status');f.guard.before(status);
   assert.equal(f.guard.status('chat').phase,'active');
+});
+
+test('a real new user turn admits the original material target after a problem stop',t=>{
+  const f=fixture(t,{guardMaxRepairAttempts:0});
+  const metadata={target:'/Game/M_Delivery',family:'material_edit'};
+  const first=f.exec('unreal_material_patch');f.attach(first,metadata);f.guard.before(first);f.fail(first);
+  const denied=f.exec('unreal_material_patch');f.attach(denied,metadata);
+  assert.throws(()=>f.guard.before(denied),{code:'REPAIR_BUDGET_EXHAUSTED'});
+  f.event('turn/end',1,3);f.event('turn/start',2,4);
+  const resumed=f.exec('unreal_material_patch');f.attach(resumed,metadata);f.guard.before(resumed);
+  f.guard.after(resumed,{ok:true,verified:true});
+  assert.equal(f.guard.status('chat').turn,2);
+  assert.equal(f.guard.status('chat').repairs.total,0);
+  assert.equal(f.guard.status('chat').lastError,null);
+});
+
+test('a material editor conflict preserves pending user edits without suggesting another write route or consuming repair attempts',async t=>{
+  const f=fixture(t,{guardMaxRepairAttempts:0});
+  const metadata={target:'/Game/M_UserEdits.M_UserEdits',family:'material_edit'};
+  const call=f.exec('unreal_material_patch');f.attach(call,metadata);f.guard.before(call);
+  const result={ok:false,error:{code:'MATERIAL_EDITOR_CONFLICT',message:`${metadata.target} has unapplied Material Editor changes`,details:{execution:'not_started',rollback:'not_needed',retryable:false}}};
+  assert.equal(f.guard.after(call,result),result,'The native conflict remains intact');
+  const state=f.guard.status('chat');
+  assert.equal(state.lastError.recovery,'resolve_editor_conflict');
+  assert.equal(state.lastError.recoveryConstraints.target,metadata.target);
+  assert.equal(state.lastError.recoveryConstraints.retainPendingEdits,true);
+  assert.equal(state.repairs.total,0);assert.equal(state.repairs.attemptsUsed,0);
+  assert.equal(state.budgetExhausted,false);
+  const notice=await f.hooks.get('agent/pre-step')({agent:f.agent,step:2},async()=>({kind:'enter',messages:[]}));
+  const instruction=notice.messages.at(-1).content[0].text;
+  assert.ok(instruction.includes(metadata.target));
+  assert.match(instruction,/等待用户处理现有编辑状态后重新读取目标/);
+  assert.match(instruction,/不得自动 Apply、丢弃修改、关闭编辑器、换工具或创建替代资产/);
+  assert.doesNotMatch(instruction,/改用允许的操作|修正写入使用新的 requestId/);
+  const diagnostic=f.exec('unreal_material_read');f.attach(diagnostic,{...metadata,kind:'read'});f.guard.before(diagnostic);
+  f.guard.after(diagnostic,{ok:true});
+  const other=f.exec('unreal_material_patch');f.attach(other,{...metadata,target:'/Game/M_Independent'});f.guard.before(other);
+  f.guard.after(other,{ok:true});
+  // Native preflight will recheck editor state; there is no persistent host lock
+  // preventing a later authorized write after the user resolves the conflict.
+  const resumed=f.exec('unreal_material_patch');f.attach(resumed,metadata);f.guard.before(resumed);f.guard.after(resumed,{ok:true});
+  assert.equal(f.guard.status('chat').repairs.total,0);
 });
 
 test('tool arguments cannot forge problem metadata or claim the read exemption',t=>{

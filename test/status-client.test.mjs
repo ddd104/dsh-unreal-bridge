@@ -12,6 +12,9 @@ test('execution display distinguishes issue limits, deferred settings and editor
   const text=JSON.stringify(tree.toJSON());
   for(const value of ['执行中','剩余 1 分 30 秒','单问题修复上限 3 次','修复 1/3','已达限制','其他对话','下一轮任务生效','原始错误'])assert.ok(text.includes(value),value);
   assert.equal(tree.root.findAllByType('progress').length,3);
+  await act(async()=>{tree.update(React.createElement(ExecutionStatus,{state:{executionSafety:{...status,waitingForUser:true}}}));});
+  assert.match(JSON.stringify(tree.toJSON()),/等待回答（计时已暂停）/);
+  assert.match(JSON.stringify(tree.toJSON()),/剩余 1 分 30 秒/);
   await act(async()=>{tree.update(React.createElement(ExecutionStatus,{state:{executionSafety:{...status,active:false,phase:'completed',startedAt:1,elapsedMs:2100},writeLock:{code:'ROLLBACK_FAILED'}}}));});
   const completed=JSON.stringify(tree.toJSON());
   assert.ok(completed.includes('本轮已结束'));assert.ok(completed.includes('写入已锁定'));

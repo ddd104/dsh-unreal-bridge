@@ -63,7 +63,7 @@ const waitFor=async(predicate,label)=>{
   }
 };
 try{
-  const testGroups=['DSH.Bridge.LevelBlueprintLookup','DSH.Bridge.PresentationSafety','DSH.Bridge.McpTargetValidation'];
+  const testGroups=['DSH.Bridge.LevelBlueprintLookup','DSH.Bridge.PresentationSafety','DSH.Bridge.McpTargetValidation','DSH.Bridge.McpOperationContext','DSH.Bridge.WriteCoordination'];
   child=spawn(join(resolve(engine),'Engine/Binaries/Win64/UnrealEditor-Cmd.exe'),[
     projectPath,'-unattended','-NullRHI','-RenderOffscreen','-nosplash','-nop4','-nosound','-NoAutoSave',
     '-DSHLevelBlueprintLookupFixture',`-DSHBridgeDescriptor=${bridge.descriptorPath}`,
@@ -77,19 +77,19 @@ try{
   assert.equal(editor.pid,child.pid,'Only the editor launched by this check may be used');
   assert.equal((await realpath(editor.projectPath)).toLowerCase(),projectPath.toLowerCase());
   bridge.bind(session,editor.editorId);
-  for(const capability of ['mcp_target_validation','safe_asset_presentation','level_blueprint_lookup'])assert.ok(editor.capabilities.includes(capability),`Missing capability ${capability}`);
+  for(const capability of ['mcp_target_validation','mcp_operation_context','safe_asset_presentation','level_blueprint_lookup'])assert.ok(editor.capabilities.includes(capability),`Missing capability ${capability}`);
   let native;
   await waitFor(async()=>{
-    try{native=JSON.parse((await readFile(join(nativeReport,'index.json'),'utf8')).replace(/^\uFEFF/,''));return native.inProcess===0&&native.tests?.length>=9;}
+    try{native=JSON.parse((await readFile(join(nativeReport,'index.json'),'utf8')).replace(/^\uFEFF/,''));return native.inProcess===0&&native.tests?.length>=15;}
     catch{return false;}
   },'native automation completion');
   assert.equal(native.failed,0,JSON.stringify(native.tests.filter(test=>test.state!=='Success').map(test=>({name:test.fullTestPath,state:test.state,errors:test.entries.filter(entry=>entry.event?.type==='Error').slice(0,3).map(entry=>entry.event.message)}))));
   const nativeTests=native.tests.map(({fullTestPath,state})=>({name:fullTestPath,state}));
-  for(const [group,count] of [[testGroups[0],2],[testGroups[1],4],[testGroups[2],3]]){
+  for(const [group,count] of [[testGroups[0],2],[testGroups[1],4],[testGroups[2],3],[testGroups[3],4],[testGroups[4],2]]){
     assert.equal(nativeTests.filter(test=>test.name.startsWith(`${group}.`)).length,count,`Expected ${count} tests for ${group}`);
   }
-  assert.equal(native.succeeded,native.tests.length);
-  pass('real UE advertises all safety capabilities and passes nine native preservation, presentation and preflight tests');
+  assert.equal(native.succeeded+native.succeededWithWarnings,native.tests.length);
+  pass('real UE advertises all safety capabilities and passes fifteen native ownership, preservation and write-coordination tests');
 
   const mapPath='/Game/DSHBridgeTests/Map_LevelLookup_Live';
   const mapDiskPath=join(projectPath,'..','Content','DSHBridgeTests','Map_LevelLookup_Live.umap');

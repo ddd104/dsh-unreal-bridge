@@ -290,7 +290,7 @@ async function toolFixture(t,{modalities=['text'],attachments=true}={}){
 
 test('DSH visual tools use the filesystem service and preserve text fallback without write approval',async t=>{
   const f=await toolFixture(t),captureTool=f.tools.get('unreal_visual_capture'),compareTool=f.tools.get('unreal_visual_compare');
-  const state=await f.tools.get('unreal_state').execute({},f.exec);assert.equal(state.visualTools.revision,2);assert.ok(state.visualTools.analyses.includes('color_distribution'));assert.equal(state.visualTools.signedZeroNormalized,true);
+  const state=await f.tools.get('unreal_state').execute({},f.exec);assert.equal(state.visualTools.revision,3);assert.ok(state.visualTools.analyses.includes('color_distribution'));assert.ok(state.visualTools.analyses.includes('source_rgba'));assert.equal(state.visualTools.signedZeroNormalized,true);
   const capture=await captureTool.execute({fullViewport:true},f.exec);assert.equal(capture.ok,true);assert.equal(capture.visualOutput.mode,'text');assert.equal(capture.visualOutput.reason.code,'MODEL_IMAGE_INPUT_UNSUPPORTED');
   const referencePath=join(f.stateDir,'input.png');await copyFile(capture.cropPath,referencePath);
   const result=await compareTool.execute({referencePath,captureId:capture.captureId,mode:'regression',alignmentConfirmed:true},f.exec);

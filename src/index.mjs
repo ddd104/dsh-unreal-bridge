@@ -5,17 +5,21 @@ import {TYPERT} from './remote.mjs';
 import {writeFile} from 'node:fs/promises';
 import {VisualService} from './visual.mjs';
 import {prepareVisualOutput,renderVisualOutput,normalizeVisualValue} from './visual-output.mjs';
-import {visualCaptureSchema,visualCompareSchema} from './protocol.mjs';
+import {visualCaptureSchema,visualCompareSchema,imageAnalyzeSchema} from './protocol.mjs';
 import {registerProjectSkills} from './skills.mjs';
 import {registerExecutionGuard} from './execution-guard.mjs';
+import {registerModelRecovery} from './model-recovery.mjs';
 import {GUIDE} from './guide.mjs';
 import {createConfigState,registerSettings} from './settings.mjs';
 import {CacheManager} from './cache-manager.mjs';
 import {createStateService} from './state-service.mjs';
 import {operationContext} from './operation-context.mjs';
+import {compactExecutionSafety} from './compact-safety.mjs';
 import {optionalServices} from './optional-services.mjs';
 export {Config} from './settings.mjs';
 import {levelBlueprintSchema} from './protocol.mjs';
+import {materialReadSchema,materialPatchSchema} from './protocol.mjs';
+import {requiresMcpOperationContext} from './mcp-contract.mjs';
 
 export const name='unreal-bridge';
 export const inject=['tools','systemPrompt','typert'];
@@ -29,6 +33,8 @@ export async function apply(ctx,raw={}) {
   const outputContext={get:getService};
   const bridge=new UnrealBridge(getConfig(),{getConfig});
   const guard=registerExecutionGuard(ctx,getConfig,{onChange:()=>bridge.changed(),getService});
+  const disposeModelRecovery=registerModelRecovery(ctx,guard);
+  ctx.effect(()=>disposeModelRecovery,'Unreal model parameter recovery');
   const state=createStateService(bridge,guard,getConfig);
   const cache=new CacheManager({stateDir:bridge.config.stateDir,getConfig,onError:error=>ctx.logger?.warn?.(`[Unreal Cache] ${error.message}`)});
   ctx.effect(()=>()=>cache.dispose(),'Unreal cache lifetime');
@@ -73,7 +79,8 @@ export async function apply(ctx,raw={}) {
     catch(error){result=errorResult(error?.name==='AbortError'?Object.assign(new Error('Operation cancelled'),{code:'CANCELLED'}):error);}
     await guard.after(exec,result);
     const budget=guard.status(exec.agent?.session?.id);
-    if(budget&&(budget.warning||result?.ok===false)&&result&&typeof result==='object')result={...result,executionSafety:budget};
+    if(budget&&(budget.warning||result?.ok===false)&&result&&typeof result==='object'&&!['unreal_state','unreal_bind'].includes(exec.name))
+      result={...result,executionSafety:compactExecutionSafety(budget,result)};
     return result;
   }
   function parseToolArgs(name,schema,args){
@@ -98,15 +105,33 @@ export async function apply(ctx,raw={}) {
         if(operation){guard.setOperation(exec,operation);await guard.before(exec);}
         throw error;
       }
-      const operation=operationContext(bridge,session,name,parsed);
-      if(operation){guard.setOperation(exec,operation);await guard.before(exec);}
-      return {ok:true,...await execute(parsed,exec,session)};
+      let admitted=false;
+      const admit=async evidence=>{
+        if(admitted)return;
+        admitted=true;
+        const replay=evidence?.replay===true;
+        const operation=operationContext(bridge,session,name,parsed,replay?undefined:evidence);
+        if(replay&&operation)operation.kind='read';
+        if(operation){guard.setOperation(exec,operation);await guard.before(exec);}
+      };
+      const deferredMcp=name==='unreal_mcp_call_toolset'
+        ?requiresMcpOperationContext({name:'call_tool',arguments:{toolset_name:parsed.toolsetName,tool_name:parsed.toolName}})
+        :name==='unreal_mcp_call'&&requiresMcpOperationContext(parsed);
+      if(!deferredMcp)await admit();
+      try{return {ok:true,...await execute(parsed,exec,session,admit)};}
+      catch(error){
+        // Preflight/schema failures have not reached a mutation. Retain their
+        // stable fallback accounting; a verified operation is admitted once.
+        if(!admitted)await admit();
+        throw error;
+      }
     });}
   });
   tool('unreal_state','Read available editor instances, current conversation binding/selection, execution limits, and installed visual-tool revision.',z.object({}).strict(),async(_a,_e,s)=>state(s));
   tool('unreal_bind','Bind this conversation to an editor instance, or null to disconnect.',z.object({editorId:id.nullable()}).strict(),async(a,_e,s)=>{bridge.bind(s,a.editorId);return state(s);});
   tool('unreal_runtime_snapshot','Sample properties and components of the exact PIE runtime target. Omit target only for one selected PIE Actor/component. Read-only sampled evidence, not execution history.',runtimeSnapshotSchema,async(a,e,s)=>bridge.runtimeSnapshot(s,a,e.signal));
   tool('unreal_runtime_history','Read this conversation\'s retained PIE snapshot summaries, or one full snapshot by snapshotId. Works while the editor is offline; inspect status and capturedAt before interpreting values.',runtimeHistorySchema,async(a,_e,s)=>bridge.runtimeHistory(s,a));
+  tool('unreal_image_analyze','Read original decoded RGBA samples, regional color/alpha statistics and optional explicit background composites from a local image up to 20 MiB. Preserves source alpha; no editor connection, shape inference, scene edit, or visual match verdict.',imageAnalyzeSchema,async(a,e,s)=>normalizeVisualValue(await visual.analyze(s,a,e)));
   const visualTool=(name,description,schema,execute)=>ctx.tools.register({
     name,description,parameters:jsonSchema(schema),output:{schema:{type:'object',properties:{},additionalProperties:true},render:renderVisualOutput},
     isConcurrencySafe:()=>false,presentCall:args=>({card:'generic',title:description.split('.')[0],kind:'read',rawInput:args}),
@@ -132,9 +157,14 @@ export async function apply(ctx,raw={}) {
   tool('unreal_mcp_tools','List top-level UE 5.8 MCP tools and their input schemas for this editor.',z.object({}).strict(),async(_a,e,s)=>bridge.mcpTools(s,e.signal));
   tool('unreal_mcp_toolsets','List UE 5.8 MCP toolsets available in the bound editor. Use before describing a toolset.',z.object({}).strict(),async(_a,e,s)=>bridge.mcpToolsets(s,e.signal));
   tool('unreal_mcp_describe','Describe a UE 5.8 MCP toolset. Filter by function name; use includeSchema=false for a compact list, then obtain the exact matching schema before calling.',mcpDescribeSchema,async(a,e,s)=>bridge.mcpDescribe(s,a,e.signal));
-  tool('unreal_mcp_call','Call a discovered UE 5.8 MCP tool directly in the bound editor without an approval prompt. Supply the exact name, arguments and requestId.',mcpCallSchema,async(a,e,s)=>bridge.mcpCall(s,a,e.signal),true);
-  tool('unreal_mcp_call_toolset','Call a discovered UE 5.8 toolset function directly in the bound editor without an approval prompt. Supply the full toolsetName, function short name in toolName, and arguments matching its current discovered schema.',mcpToolsetCallSchema,async(a,e,s)=>bridge.mcpCallToolset(s,a,e.signal),true);
+  tool('unreal_mcp_call','Call a discovered UE 5.8 MCP tool directly in the bound editor without an approval prompt. Supply the exact name, arguments and requestId.',mcpCallSchema,async(a,e,s,admit)=>bridge.mcpCall(s,a,e.signal,admit),true);
+  tool('unreal_mcp_call_toolset','Call a discovered UE 5.8 toolset function directly in the bound editor without an approval prompt. Supply the full toolsetName, function short name in toolName, and arguments matching its current discovered schema.',mcpToolsetCallSchema,async(a,e,s,admit)=>bridge.mcpCallToolset(s,a,e.signal,admit),true);
   tool('unreal_data_table_copy_property','Copy one reflected DataTable property from sourceRow to targetRows (omit for all other rows). Atomic native deep copy, verified rollback, no JSON round trip, no save or desktop input.',dataTableCopySchema,async(a,e,s)=>{await approve(e,`复制 DataTable 字段：${a.assetPath}\n${a.sourceRow} → ${a.targetRows?.join(', ')??'其他所有行'}\n${a.propertyName}`);return bridge.copyDataTableProperty(s,a,e.signal);},true);
+  tool('unreal_material_read','Read a material or material-function graph revision, node identities, editable properties and exact pins. Optionally inspect expression class metadata in the same request. Requires material_graph_patch; material instances use their discovered parameter tools.',materialReadSchema,async(a,e,s)=>bridge.materialRead(s,a,e.signal));
+  tool('unreal_material_patch','Preview or apply one coherent material/function graph batch with node aliases, properties, connections and outputs. Defaults to dryRun=true on a transient copy; use the same baseRevision and operations with dryRun=false to commit. Verifies compilation and failure restoration; never saves. Whole-graph layout and cleanup candidates must be explicit.',materialPatchSchema,async(a,e,s)=>{
+    if(!a.dryRun)await approve(e,`修改材质图：${a.assetPath}\n${a.operations.length} 项操作；不保存`);
+    return bridge.materialPatch(s,a,e.signal);
+  },true);
   tool('unreal_read_blueprint','Read a blueprint summary or a graph with exact node IDs and pin names.',readSchema,async(a,e,s)=>bridge.read(s,a,e.signal));
   tool('unreal_level_blueprint','Resolve an existing level Blueprint from a map without creating it or changing levels. Returns exact Blueprint and graph references for MCP tools; requires level_blueprint_lookup.',levelBlueprintSchema,async(a,e,s)=>bridge.levelBlueprint(s,a,e.signal));
   tool('unreal_focus_asset','Open and maximize an asset editor; optionally focus a graph and its nodes. Asset edits already do this automatically.',focusSchema,async(a,e,s)=>bridge.focus(s,a,e.signal));

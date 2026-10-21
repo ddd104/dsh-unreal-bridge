@@ -14,7 +14,7 @@ export function ExecutionStatus({state}) {
   const write=state.editorWrite;
   return h('div',{'aria-label':'执行状态',style:{marginTop:8,borderTop:'1px solid var(--dsw-alias-border-l2, #ddd)',paddingTop:8}},
     status?h('details',null,
-      h('summary',{style:{cursor:'pointer'}},`任务：${phases[status.phase]??'等待任务'} · 工具 ${status.toolCalls}/${status.limits.guardMaxToolCalls}`,
+      h('summary',{style:{cursor:'pointer'}},`任务：${status.waitingForUser?'等待回答（计时已暂停）':phases[status.phase]??'等待任务'} · 工具 ${status.toolCalls}/${status.limits.guardMaxToolCalls}`,
         status.active?` · 剩余 ${duration(status.remaining.timeMs)}`:status.startedAt?` · 用时 ${duration(status.elapsedMs??0)}`:null),
       h('div',{style:{display:'flex',flexWrap:'wrap',gap:12,marginTop:8}},
         metric('工具调用',status.toolCalls,status.limits.guardMaxToolCalls,status.remaining.toolCalls),

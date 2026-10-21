@@ -8,9 +8,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { VERSION, helloSchema, selectionSchema, patchSchema, createSchema, readSchema, focusSchema, catalogSchema, knowledgeSchema, knowledgeRecordSchema, mcpCallSchema, mcpDescribeSchema, mcpToolsetCallSchema, dataTableCopySchema, runtimeChangedSchema, runtimeSnapshotSchema, runtimeSnapshotResultSchema, runtimeHistorySchema, fail, BridgeError } from './protocol.mjs';
 import { assertSafeMcpCall } from './mcp-policy.mjs';
 import {levelBlueprintSchema} from './protocol.mjs';
-import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure} from './mcp-contract.mjs';
+import {materialReadSchema,materialPatchSchema} from './protocol.mjs';
+import {shortToolName,describeTools,validateMcpArguments,isReadOnlyMcpCall,mcpFailure,mcpOperationToolName,requiresMcpOperationContext} from './mcp-contract.mjs';
 import {isUnsafeWriteError} from './write-safety.mjs';
 import {EditorWrites} from './editor-writes.mjs';
+import {rememberMaterialRead,validateMcpOperationContext} from './operation-context.mjs';
 
 export function defaultStateDir() {
   return process.platform==='win32' ? join(process.env.LOCALAPPDATA ?? join(homedir(),'AppData','Local'),'DSHUnrealBridge') : join(process.env.XDG_STATE_HOME ?? join(homedir(),'.local','state'),'dsh-unreal-bridge');
@@ -20,6 +22,7 @@ const secureEquals = (a,b) => { const x=Buffer.from(a),y=Buffer.from(b); return 
 const runtimeKey=target=>JSON.stringify([target.playSessionId,target.worldId,target.objectId]);
 const sameRuntimeTarget=(a,b)=>runtimeKey(a)===runtimeKey(b);
 const runtimeIdentity=({playSessionId,worldId,objectId})=>({playSessionId,worldId,objectId});
+const materialIdentity=value=>typeof value==='string'?`${value.includes('.')?value:`${value}.${value.split('/').at(-1)}`}`.toLowerCase():null;
 const SNAPSHOT_LIMIT=20, SNAPSHOT_BYTES=16*1024*1024;
 
 export class UnrealBridge extends EventEmitter {
@@ -104,7 +107,7 @@ export class UnrealBridge extends EventEmitter {
   }
   changed(){this.eventVersion++;this.emit('change');}
   list(){return [...this.editors.values()].map(({editorId,project,projectPath,engineVersion,pid,capabilities})=>({editorId,project,projectPath,engineVersion,pid,capabilities}));}
-  state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);const write=this.editorWrites.get(editorId);return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:e?.selection??[],runtime:e?.runtime??null,runtimeSnapshots:this.runtimeHistory(sessionId).snapshots,blueprintSupport:{normalBlueprints:e?.capabilities.includes('read_blueprint')??false,levelBlueprintLookup:e?.capabilities.includes('level_blueprint_lookup')??false,levelBlueprintNativePatch:false},toolSafety:{argumentSchemaValidation:true,nativeTargetValidation:e?.capabilities.includes('mcp_target_validation')??false,safePresentation:e?.capabilities.includes('safe_asset_presentation')??false},allowWrites:this.config.allowWrites,requireApproval:this.config.requireApproval,uncertain:this.uncertain.get(sessionId)??(write?.phase==='uncertain'?this.editorWrites.details(write):null),editorWrite:write?this.editorWrites.details(write):null,writeLock:this.writeLocks.get(editorId)??null};}
+  state(sessionId){const editorId=this.sessions.get(sessionId);const e=this.editors.get(editorId);const write=this.editorWrites.get(editorId);return {version:this.eventVersion,sessionId,editorId:editorId??null,connected:!!e,editors:this.list(),selection:e?.selection??[],runtime:e?.runtime??null,runtimeSnapshots:this.runtimeHistory(sessionId).snapshots,blueprintSupport:{normalBlueprints:e?.capabilities.includes('read_blueprint')??false,levelBlueprintLookup:e?.capabilities.includes('level_blueprint_lookup')??false,levelBlueprintNativePatch:false},toolSafety:{argumentSchemaValidation:true,nativeTargetValidation:e?.capabilities.includes('mcp_target_validation')??false,nativeOperationContext:e?.capabilities.includes('mcp_operation_context')??false,safePresentation:e?.capabilities.includes('safe_asset_presentation')??false},allowWrites:this.config.allowWrites,requireApproval:this.config.requireApproval,uncertain:this.uncertain.get(sessionId)??(write?.phase==='uncertain'?this.editorWrites.details(write):null),editorWrite:write?this.editorWrites.details(write):null,writeLock:this.writeLocks.get(editorId)??null};}
   bind(sessionId,editorId){if(editorId!==null&&!this.editors.has(editorId))fail('INSTANCE_NOT_FOUND','Editor is not connected'); if(this.inflight.has(sessionId))fail('BUSY','A request is still executing for this conversation');editorId===null?this.sessions.delete(sessionId):this.sessions.set(sessionId,editorId);this.bindingVersions.set(sessionId,(this.bindingVersions.get(sessionId)??0)+1);this.changed();return this.state(sessionId);}
   target(sessionId){const editorId=this.sessions.get(sessionId);if(!editorId)fail('NOT_BOUND','Select an Unreal Editor instance for this conversation first');const editor=this.editors.get(editorId);if(!editor)fail('DISCONNECTED','The bound editor is offline; reconnect it or choose another instance');return editor;}
   mcpTarget(sessionId){const editor=this.target(sessionId);if(!editor.capabilities.includes('mcp_tools'))fail('MCP_UNAVAILABLE','This editor does not expose UE MCP tools; enable ModelContextProtocol and update DSHUnrealBridge');return editor;}
@@ -217,7 +220,7 @@ export class UnrealBridge extends EventEmitter {
     const tools=includeSchema?found:found.map(({name,fullName,toolsetName,description})=>({name,fullName,toolsetName,description:description?.split('\n')[0]?.slice(0,180)??''}));
     return {...result,content:result.content.map(item=>item===block?{...item,text:JSON.stringify({...description,tools})}:item)};
   }
-  async mcpCall(sessionId,args,signal){
+  async mcpCall(sessionId,args,signal,admit){
     const {name,arguments:toolArgs,requestId}=mcpCallSchema.parse(args),editor=this.mcpTarget(sessionId),bindingVersion=this.bindingVersions.get(sessionId);
     let call={name,arguments:toolArgs};
     assertSafeMcpCall(call,{allowDesktopInput:this.config.allowMcpDesktopInput===true});
@@ -241,7 +244,10 @@ export class UnrealBridge extends EventEmitter {
     // Cached outcomes and existing write barriers take precedence over discovery.
     // A preflight failure has no cached outcome, so its arguments can be corrected.
     const priorKey=`${editor.editorId}:${sessionId}:${requestId}`;
-    if(this.results.has(priorKey))return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal,{mcpReadOnly});
+    if(this.results.has(priorKey)){
+      await admit?.({replay:true});
+      return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal,{mcpReadOnly});
+    }
     if(!mcpReadOnly)this.assertWriteAvailable(sessionId,editor);
     let tool;
     if(toolsetName){
@@ -256,10 +262,44 @@ export class UnrealBridge extends EventEmitter {
     validateMcpArguments(tool,toolsetName?call.arguments.arguments:call.arguments);
     if(this.mcpTarget(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','The editor binding changed during MCP argument validation; read its current schema before retrying',{execution:'not_started',retryable:true});
     if(!editor.capabilities.includes('mcp_target_validation'))fail('MCP_TARGET_VALIDATION_UNAVAILABLE','Update and restart the UE bridge plugin before executing MCP tools: this editor cannot verify target object types and ownership before dispatch',{execution:'not_started',retryable:true,requiredCapability:'mcp_target_validation'});
-    return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal,{mcpReadOnly});
+    let operationToken;
+    if(requiresMcpOperationContext(call)){
+      if(!editor.capabilities.includes('mcp_operation_context'))fail('MCP_OPERATION_CONTEXT_UNAVAILABLE','Update and restart the UE bridge plugin before Blueprint or Object tools: native edit ownership is required for repair accounting',{execution:'not_started',retryable:false,requiredCapability:'mcp_operation_context'});
+      const result=await this.request(editor,'mcp_operation_context',call,{signal});
+      if(signal?.aborted)fail('CANCELLED','Operation context lookup cancelled',{execution:'not_started'});
+      if(this.mcpTarget(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed during operation ownership validation',{execution:'not_started',retryable:true});
+      const evidence=validateMcpOperationContext(result,mcpOperationToolName(call));
+      if(!mcpReadOnly&&evidence.blueprintOwners.length>1)fail('MCP_TARGET_OWNER_MISMATCH','A repair-scoped write must target one Blueprint owner; split independent asset edits',{execution:'not_started',retryable:true});
+      operationToken=evidence.token;
+      await admit?.({...evidence,editor,bindingVersion});
+    }else await admit?.();
+    if(this.mcpTarget(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed before MCP dispatch',{execution:'not_started',retryable:true});
+    return this.mutate(sessionId,'mcp_call_tool',call,requestId,signal,{mcpReadOnly,operationToken});
   }
-  async mcpCallToolset(sessionId,args,signal){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal);}
+  async mcpCallToolset(sessionId,args,signal,admit){const {toolsetName,toolName,arguments:toolArgs,requestId}=mcpToolsetCallSchema.parse(args);return this.mcpCall(sessionId,{name:'call_tool',arguments:{toolset_name:toolsetName,tool_name:toolName,arguments:toolArgs},requestId},signal,admit);}
   async copyDataTableProperty(sessionId,args,signal){const {requestId,...params}=dataTableCopySchema.parse(args);if(!this.target(sessionId).capabilities.includes('data_table_copy_property'))fail('DATA_TABLE_COPY_UNAVAILABLE','Update the UE bridge plugin to copy DataTable properties safely; do not fall back to set_rows or desktop input',{retryable:false});return this.mutate(sessionId,'data_table_copy_property',params,requestId,signal);}
+  async materialRead(sessionId,args,signal){
+    const params=materialReadSchema.parse(args),editor=this.target(sessionId),bindingVersion=this.bindingVersions.get(sessionId);
+    if(!editor.capabilities.includes('material_graph_patch'))fail('MATERIAL_TOOLS_UNAVAILABLE','Update the UE bridge plugin to read and patch material graphs',{execution:'not_started',retryable:false});
+    const result=await this.request(editor,'material_read',params,{signal});
+    if(this.target(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed during material read; read the current target again');
+    if(materialIdentity(result?.assetPath)!==materialIdentity(params.assetPath)||result?.nodesComplete!==(params.nodeIds===undefined))
+      fail('MATERIAL_READ_INVALID','Editor material read target or coverage does not match the request');
+    if(!rememberMaterialRead(this,sessionId,result))fail('MATERIAL_READ_INVALID','Editor material read did not return consistent native node ownership');
+    return result;
+  }
+  async materialPatch(sessionId,args,signal){
+    const {requestId,...params}=materialPatchSchema.parse(args),editor=this.target(sessionId);
+    if(!editor.capabilities.includes('material_graph_patch'))fail('MATERIAL_TOOLS_UNAVAILABLE','Update the UE bridge plugin to preview and patch material graphs',{execution:'not_started',retryable:false});
+    if(params.dryRun){
+      const bindingVersion=this.bindingVersions.get(sessionId);
+      const result=await this.request(editor,'material_patch',params,{id:requestId,signal});
+      if(this.target(sessionId)!==editor||this.bindingVersions.get(sessionId)!==bindingVersion)fail('INSTANCE_CHANGED','Editor binding changed during material preview');
+      if(result?.verified!==true||result?.dryRun!==true)fail('MATERIAL_PREVIEW_INVALID','Editor did not return a verified dry-run result',{execution:'completed',retryable:false});
+      return result;
+    }
+    return this.mutate(sessionId,'material_patch',params,requestId,signal);
+  }
   invalidate(editorId,asset){for(const [key,p] of this.previews) if(p.editorId===editorId&&(!asset||p.params.assetPath.split('.')[0]===asset.split('.')[0]))this.previews.delete(key);}
   async preview(sessionId,kind,args,signal){
     const params=kind==='patch'?patchSchema.parse(args):createSchema.parse(args); const editor=this.target(sessionId);
@@ -306,14 +346,16 @@ export class UnrealBridge extends EventEmitter {
     let dispatched=false;
     try {
       await this.audit({phase:'requested',sessionId,editorId:editor.editorId,requestId,method,assetPath:params.assetPath,toolName:params.name,paramsHash:hash});
-      if(readOnly&&(this.sessions.get(sessionId)!==editor.editorId||this.bindingVersions.get(sessionId)!==bindingVersion||this.editors.get(editor.editorId)!==editor))fail('INSTANCE_CHANGED','Editor binding changed before the read was dispatched',{execution:'not_started',retryable:true});
+      if((readOnly||options.operationToken)&&(this.sessions.get(sessionId)!==editor.editorId||this.bindingVersions.get(sessionId)!==bindingVersion||this.editors.get(editor.editorId)!==editor))fail('INSTANCE_CHANGED','Editor binding changed before the operation was dispatched',{execution:'not_started',retryable:true});
       // An abort/offline connection before dispatch cannot leave an unknown write.
       if(signal?.aborted)fail('CANCELLED','Request cancelled before dispatch',{execution:'not_started',requestId});
       if(editor.ws.readyState!==WebSocket.OPEN)fail('DISCONNECTED','Editor disconnected before dispatch',{execution:'not_started',requestId});
       dispatched=true;
-      const result=await this.request(editor,method,params,{id:requestId,signal,timeoutMs});
+      const wireParams=method==='mcp_call_tool'&&options.operationToken?{...params,operationToken:options.operationToken}:params;
+      const result=await this.request(editor,method,wireParams,{id:requestId,signal,timeoutMs});
       if(method==='mcp_call_tool'&&(result?.isError===true||result?.ok===false))throw mcpFailure(result,requestId,readOnly);
       if(method==='data_table_copy_property'&&result?.verified!==true)fail('DATA_TABLE_ROLLBACK_FAILED','The DataTable copy did not return a verified result; stop writes and inspect the editor',{retryable:false,rollback:'failed',requestId});
+      if(method==='material_patch'&&(result?.verified!==true||result?.dryRun!==false))fail('ROLLBACK_FAILED','The material write did not return a verified commit result; the editor remains protected',{retryable:false,rollback:'failed',requestId});
       this.cacheResult(key,{hash,result});
       await this.audit({phase:'completed',sessionId,editorId:editor.editorId,requestId,method,revision:result?.revision}).catch(e=>this.emit('diagnostic',`Audit completion failed: ${e.message}`));
       if(readOnly&&(this.sessions.get(sessionId)!==editor.editorId||this.bindingVersions.get(sessionId)!==bindingVersion||this.editors.get(editor.editorId)!==editor))fail('INSTANCE_CHANGED','Editor binding changed during the read; query the current editor again',{execution:'completed',retryable:true});
@@ -352,6 +394,7 @@ export class UnrealBridge extends EventEmitter {
       if(!valid)fail('INVALID_REQUEST_STATUS','The completed write response is malformed; the editor remains protected');
       let error=result.response.ok?null:new BridgeError(result.response.error.code,result.response.error.message,result.response.error.details);
       if(!error&&lease.method==='data_table_copy_property'&&result.response.result?.verified!==true)error=new BridgeError('DATA_TABLE_ROLLBACK_FAILED','The recovered copy result is unverified',{rollback:'failed',retryable:false,requestId});
+      if(!error&&lease.method==='material_patch'&&(result.response.result?.verified!==true||result.response.result?.dryRun!==false))error=new BridgeError('ROLLBACK_FAILED','The recovered material commit is unverified',{rollback:'failed',retryable:false,requestId});
       if(!error&&lease.method==='mcp_call_tool'&&(result.response.result?.isError===true||result.response.result?.ok===false))error=mcpFailure(result.response.result,requestId);
       if(error)this.lockUnsafeWrite(editor.editorId,error,lease);
       const original=this.uncertain.get(lease.sessionId);

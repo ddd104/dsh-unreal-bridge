@@ -2,6 +2,8 @@
 
 DeepSeek Harness 对话插件与 Unreal Editor 插件。对话分别绑定本机 UE 实例，在聊天输入框上方显示当前 Content Browser 资产、关卡 Actor 或组件选区，并通过同一连接使用 UE MCP 工具和项目知识查询。
 
+从零了解两侧职责、框架、CLI 与 Python 的角色，以及完整运行和失败恢复链路，见 [技术架构与运行链路](docs/technical-overview.md)（52 个问题与回答，含架构图和源码阅读地图）。
+
 ## 本机安装
 
 本交付面向 Windows、DSH 0.2.1-rc.2，以及 EHV 使用的 UEAS58（当前 UE 5.8.2）。DSH 源码目录 `F:\AI\deepseek-harness` 用于核对扩展接口；插件独立安装到 DSH desktop 配置，不修改核心代码。UE 插件安装在 `F:\UE5Project\EHV\Plugins\DSHUnrealBridge`。旧版 DSH 验证保留在历史记录中；0.5.0 的设置保存与热更新已通过实际安装的 0.2.1-rc.2 运行时核验。
@@ -74,6 +76,28 @@ Actor 蓝图编辑器内的组件显示为“蓝图组件”，同步组件模�
 
 首版仅支持编辑器关卡视口、单帧 SDR PNG/JPEG/WebP 比较；不支持 PIE/UMG、蓝图预览组件、HDR、动态闪烁或自动调参。比较原图最多 8 Mi 像素，参考输入最多 20 MiB。图片或附件服务不可用时仍返回指标和证据路径，并明确说明模型没有看到图片。详情和参数见 [局部画面对比](docs/visual-comparison.md)。
 
+## 通用材质工作流
+
+随 UE 插件交付的 `ue-material-workflow` 技能覆盖材质、材质函数及实例的创建、修改、调试与验收。参考图匹配是条件分支；小范围实例参数修改只执行必要的读取、更新与验证，不强制重建材质图。技能记录默认值来源、参数单位、图维护范围与完成证据，不包含特定工程路径、图形或颜色。
+
+新建效果或改变形状、行为时，先结合用户文字和参考图说明可见内容、部件关系、参数行为与验收条件，再构建材质。用户明确的修改优先；源透明度与预览底色分开解释，要求对应的部件共享几何定义。交付时逐项核对原要求，不能把已生成的错误效果重新定义为目标。信息足够时直接执行，只有影响核心结果的未决歧义才需澄清。技能 Markdown 可单独更新，无需重编译；旧会话重新调用 `ue-material-workflow`（也可在消息第一行写 `/ue-material-workflow`）读取新版。
+
+`unreal_image_analyze` 无需连接 UE 即可读取本机图片的源 RGBA、指定像素、区域透明度和 alpha 覆盖边界，并单独返回指定底色上的合成统计。它不会通过白底合成结果反推透明度，也不会自动识别图形或推断材质参数。图像只读，分析报告进入现有受管证据缓存。
+
+声明 `material_graph_patch` 的 UE 插件提供 `unreal_material_read` 与 `unreal_material_patch`。先读取当前版本、节点和精确引脚，可同时查询所需表达式类；再以临时别名提交节点、属性、连接和输出的完整批次。默认 `dryRun:true`，实际提交须明确 `dryRun:false`，保持相同 `baseRevision` 并使用新的请求编号。工具不保存资产；整图排版须明确 `layout:"all"`，清理仅接受明确授权的候选节点。实例参数仍使用当前编辑器实际提供的参数工具。
+
+批次先在副本上检查引脚并进行真实着色器编译，提交失败时核验内存恢复，保留用户原有未保存改动。首版支持普通材质与材质函数；对存在已加载调用者的函数接口变更、复合图等尚不支持的操作明确拒绝。函数预览编译不代表所有调用场景均已验证。
+
+原生材质批次提交后，同步已打开材质编辑器的工作副本，再在该副本内按节点身份定位并选中修改节点。展示以完整批次为单位，不是逐节点播放。编辑器里尚未应用的人工修改会在提交前返回 `MATERIAL_EDITOR_CONFLICT`；已应用但未保存的资产不因此被拒绝。预览、失败及内容未变化的批次不重建编辑器图，也不自动应用或丢弃用户的手动修改。
+
+材质连线与新增节点按同一材质统计修复额度；原生读取核验过的材质和表达式属性修改也归入同一范围。已审计的引脚查询保持只读。保护只停止相关问题，不能通过换节点、别名或请求编号继续依赖性写入。常规错误和预警附带精简安全状态，完整记录仍通过 `unreal_state` 和界面查询。
+
+达到修复限制时，返回的恢复约束要求保留原目标与诊断，不能靠换名、新建副本或替代重建继续同一失败任务。“独立工作”指用户已要求的无关工作；宿主仍按真实资产隔离，不宣称能自动识别不同资产名背后的同一语义任务。材质 skill 配合这一流程维护正式交付目标，并分别验收编译、参数行为和默认外观；参考中可观察的线宽、边界及渐变偏差应主动对照修正。
+
+蓝图相关操作也统一计入真实所属蓝图：包括嵌套引脚、图中节点及通过 ObjectTools 进行的属性修改。BlueprintTools/ObjectTools 需要 UE 声明 `mcp_operation_context`，宿主自动预检真实归属，执行前验证对象未被替换；关卡蓝图保留独立对象身份。达到修复限制后，不能换调用包装或节点继续写入；已审计诊断及其他资产仍可使用。相关更新需要同步编译并更新 UE 插件。
+
+源 RGBA 分析和 skill 本身无需重新编译 UE；原生材质图工具及新增材质只读名单需更新 DSH 宿主、编译并更新 UE 插件，再重启相应应用。工具能力、限制与失败语义见 [工具协议](docs/protocol.md)。编译通过不代表默认外观或动态效果已通过验收。
+
 ## 项目图谱与资料
 
 DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，将该工程 `Plugins/DSHUnrealBridge/Skills/` 中的技能接入原生技能列表。支持 `<技能目录>/SKILL.md` 和平铺的 `.md`；文件需包含有效的 `name`、`description` YAML 头。工程根目录及其 `Source/`、`Script/` 等子目录均可作为工作区，不要求 Git 仓库，也不要求 UE 编辑器在线。工作区上方有多个工程时，使用最近的工程，不扫描并列工程。
@@ -86,7 +110,7 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 安装脚本发现旧 `AgentProjectGraph/Cache` 时，会复制其 UE 快照及证据到新插件缓存，再把旧插件移入工程的 `Saved/DSHUnrealBridgeBackups/`，避免旧菜单与 HTTP 服务继续加载。旧图谱和记忆不会直接复用；在编辑器中更新一次即可按新路径重建。
 
-**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 禁用写入和未确认只读的 MCP；四项已审计 DataTable 查询仍可执行。安装配置将 `requireApproval` 设为 `false`，使蓝图应用、撤销、保存和项目知识记录不再调用 DSH 批准服务，适配 `approval: never` 的会话。预览、版本校验、请求去重及显式保存要求仍然生效。若希望这些写入逐次请求批准，可将 `requireApproval` 改为 `true`，并使用 `approval: ask` 的 DSH preset。
+**权限模式：** MCP 工具调用默认直接执行，无需逐次批准；这也包括 MCP 工具集中的资产写入操作。`allowWrites: false` 禁用写入和未确认只读的 MCP；已审计的 DataTable、材质、蓝图和对象查询仍可执行。安装配置将 `requireApproval` 设为 `false`，使蓝图应用、撤销、保存、材质批量提交和项目知识记录不再调用 DSH 批准服务，适配 `approval: never` 的会话。预览、版本校验、请求去重及显式保存要求仍然生效。若希望这些写入逐次请求批准，可将 `requireApproval` 改为 `true`，并使用 `approval: ask` 的 DSH preset。
 
 ## 已实现
 
@@ -160,6 +184,10 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 ### 写入保护与循环控制
 
+UE 任务中，模型输出的工具参数若不是合法 JSON，宿主会在派发前拒绝。插件通过 DSH 的请求错误恢复接口，默认每轮最多重新生成 2 次，并将纠错提示写入会话记录；可在设置页调整“模型参数纠错次数”，设为 0 关闭。恢复只针对已记录且尚未派发的 UE 工具参数，不自动修补 JSON，不重放此前完成的操作；已有预算、未知写入及编辑器写锁继续有效。超过次数后保留原始错误并结束，其他类型的模型响应错误仍由宿主策略处理。
+
+DSH 正在等待用户回答、且同一任务没有其他工具工作时，任务时限暂停；回答、拒绝或取消后按原剩余时间恢复。并行工具仍在执行时继续计时，单纯调用名为提问的工具不会暂停。执行状态显示“等待回答（计时已暂停）”，等待不会重置工具、步骤或错误预算。
+
 复制 DataTable 列使用 `unreal_data_table_copy_property`，提供 `assetPath`、`sourceRow`、反射字段名 `propertyName` 和 UUID `requestId`；不提供 `targetRows` 时复制到其他所有行。UE 必须声明 `data_table_copy_property` 能力。缺少能力时停止该复制操作并说明需要更新插件，不回退到其他导入方式。嵌套 Map、软对象引用及浮点值直接复制，验证失败恢复操作前的内存值，包括已有未保存修改；不会从磁盘重载资产。
 
 当前引擎 `DataTableTools.set_rows/add_rows/rename_rows` 的整表 JSON 往返可能损坏未指定字段，桥接在发送前拒绝这些入口。Slate 输入操作默认关闭；只读观察仍可用。UE 任务中调用 Shell 鼠标、键盘或剪贴板接口的替代路线同样被阻止。MCP 返回 `isError:true` 或 `ok:false` 均报告失败，并保留 UE 原始错误。已确认只读的 `DataTableTools.get_schema/list_rows/get_rows/search_row_structs` 失败返回 `MCP_READ_ERROR`，其他未知或写入工具失败返回 `MCP_TOOL_ERROR`；这些错误反馈给模型，在预算内按错误纠正后继续，不直接取消整轮。策略拦截、能力不可用及已经恢复原状态的验证失败也保留纠正机会，但不能重复被禁操作或绕过保护；需要时改用许可方式，缺少必需能力则说明限制。
@@ -172,7 +200,7 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
 
 0.4.5 将原生蓝图 `ROLLBACK_FAILED` 与 DataTable/MCP 的回滚失败统一纳入写锁。蓝图补丁失败后的自动回滚还必须重新编译通过、图版本恢复为修改前版本，才报告已恢复。宿主兼容旧 UE 只返回错误码的情况；完整的原生恢复核验需要同步更新 UE 插件。
 
-同一编辑器的所有对话共用写入占用；另一对话的写入尚未完成时返回 `BUSY`，UE 原生异步入口也会拒绝重叠修改。已派发的写入超时、取消或断线后，保护继续作用于该编辑器，`unreal_state.editorWrite` 显示原请求及所属对话。任何绑定到同一编辑器的对话都可用原 `requestId` 查询完成结果；确认完成后更新原对话缓存并解除占用，若结果报告回滚失败则转为写锁。`pending`、`unknown`、`expired` 或无效状态响应不会解除保护。其他编辑器可独立工作；原生读取及已核验的四项 DataTable MCP 查询仍可用于回读，未知 MCP 工具继续按可能写入处理。
+同一编辑器的所有对话共用写入占用；另一对话的写入尚未完成时返回 `BUSY`，UE 原生异步入口也会拒绝重叠修改。已派发的写入超时、取消或断线后，保护继续作用于该编辑器，`unreal_state.editorWrite` 显示原请求及所属对话。任何绑定到同一编辑器的对话都可用原 `requestId` 查询完成结果；确认完成后更新原对话缓存并解除占用，若结果报告回滚失败则转为写锁。`pending`、`unknown`、`expired` 或无效状态响应不会解除保护。其他编辑器可独立工作；原生读取及已核验的 DataTable、材质、蓝图和对象 MCP 查询仍可用于回读，未知 MCP 工具继续按可能写入处理。
 
 预算依赖 DSH 的 `session/event`、`tools/pre-execute`、`tools/post-execute` 和 `agent/pre-step` 扩展；这些钩子管理收尾或取消当前 Agent 回合，不修改 DSH 主循环。只有桥接工具包装器可用的嵌入环境仍能限制 UE 调用，但不能拦截其他插件的工具。`unreal_state.executionSafety` 返回当前预算、剩余额度和状态。预算与收尾修复只需更新 DSH 宿主并完整重启 DSH；关卡蓝图定位另需更新 UE 插件。
 
@@ -192,6 +220,7 @@ DSH 会按当前会话的工作区，向上找到最近的 `.uproject` 工程，
     guardTimeoutMs: 1800000
     guardMaxRepairAttempts: 3
     guardMaxRepeatedErrors: 2
+    guardMaxMalformedRetries: 2
     knowledgeTimeoutMs: 120000
     visualTimeoutMs: 60000
     visualCacheRetentionDays: 30
@@ -227,6 +256,8 @@ npm pack --pack-destination ..
 ```
 
 然后运行上方安装脚本，将 `-Project` 指向自己的 Unreal 工程。Git 仓库包含 UE 插件源码；预编译 DLL 不提交到 Git，需使用目标工程对应的 Unreal Engine 构建 Editor 目标。
+
+UE 原生源码发布前必须覆盖 Unity 合并编译和非 Unity 逐文件编译，并在日志中确认插件实现文件实际参与了对应模式。Adaptive Build 可能把所有实现文件排除出 Unity；这种构建成功不能算作 Unity 验证。各实现文件的私有辅助代码使用独立命名作用域，避免合并后匿名命名空间中的同名符号冲突。
 
 `src` 为宿主与客户端源码，`lib` 为 DSH 可加载产物，`unreal` 为 Editor 模块。UE 自动化测试位于 `DSH.Bridge`。`scripts/ue-e2e.mjs` 只应针对可丢弃的测试工程运行，会创建和保存测试蓝图；不可对 EHV 等生产工程运行。具体工具协议见 [docs/protocol.md](docs/protocol.md)，本次验证证据见 [docs/validation.md](docs/validation.md)。
 

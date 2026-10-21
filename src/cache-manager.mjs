@@ -5,7 +5,7 @@ import {DEFAULTS} from './settings-spec.mjs';
 const DAY=86400000,MiB=1024*1024;
 const SESSION=/^[a-f0-9]{24}$/,ENTRY=/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const ARCHIVE=/^audit-(\d{13})\.jsonl$/;
-const FILES=new Set(['viewport.png','crop.png','capture.json','preview.png','reference-source.image','reference.png','current.png','comparison.png','difference.png','heatmap.png','heatmap-preview.png','report.json']);
+const FILES=new Set(['viewport.png','crop.png','capture.json','preview.png','reference-source.image','reference.png','current.png','comparison.png','difference.png','heatmap.png','heatmap-preview.png','report.json','analysis-source.image','analysis.json']);
 const SCAN_LIMIT=20000,FILE_LIMIT=100000;
 const refusal=(code,message)=>Object.assign(new Error(message),{code});
 const same=(a,b)=>process.platform==='win32'?resolve(a).toLowerCase()===resolve(b).toLowerCase():resolve(a)===resolve(b);

@@ -28,9 +28,42 @@ export const mcpDescribeSchema = z.object({toolsetName:mcpToolName,query:z.strin
 export const mcpCallSchema = z.object({name:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const mcpToolsetCallSchema = z.object({toolsetName:mcpToolName,toolName:mcpToolName,arguments:mcpArguments.default({}),requestId:z.string().uuid()}).strict();
 export const dataTableCopySchema = z.object({assetPath,sourceRow:z.string().min(1).max(1024),propertyName:z.string().min(1).max(160).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),targetRows:z.array(z.string().min(1).max(1024)).min(1).max(4096).optional(),requestId:z.string().uuid()}).strict();
+export const materialAssetPath=z.string().min(1).max(2048).regex(/^\/[A-Za-z0-9_]+(?:\/[A-Za-z0-9_]+)+(?:\.[A-Za-z0-9_]+)?$/).describe('Exact material or material-function asset package/object path, including project or plugin mounts. Not a level or expression subobject.');
+const expressionClass=z.string().max(512).regex(/^\/Script\/[A-Za-z0-9_]+\.[A-Za-z0-9_]+$/).describe('Exact loaded native UMaterialExpression subclass path, obtained from current class metadata.');
+const materialProperties=z.record(z.string().min(1).max(160),z.json()).describe('Reflected editable properties using the native schema. Structural ownership, GUID and direct connection fields are forbidden; use graph operations.');
+const materialEndpoint=z.object({id,pin:z.union([z.number().int().min(0).max(255),z.string().max(160)])}).strict();
+export const materialOperation=z.discriminatedUnion('op',[
+  z.object({op:z.literal('add'),id:id.max(80),expressionClass,properties:materialProperties.optional(),position:point.optional()}).strict(),
+  z.object({op:z.literal('set'),id,properties:materialProperties}).strict(),
+  z.object({op:z.literal('connect'),from:materialEndpoint,to:materialEndpoint}).strict(),
+  z.object({op:z.literal('output'),from:materialEndpoint,property:z.string().min(1).max(100).regex(/^MP_[A-Za-z0-9_]+$/)}).strict(),
+  z.object({op:z.literal('disconnect'),to:materialEndpoint}).strict(),
+  z.object({op:z.literal('delete'),id}).strict(),
+  z.object({op:z.literal('asset_properties'),properties:materialProperties}).strict()
+]);
+export const materialReadSchema=z.object({
+  assetPath:materialAssetPath,nodeIds:z.array(id).min(1).max(256).optional(),
+  expressionClasses:z.array(expressionClass).min(1).max(32).optional()
+}).strict();
+export const materialPatchSchema=z.object({
+  assetPath:materialAssetPath,baseRevision:id,dryRun:z.boolean().default(true),
+  operations:z.array(materialOperation).min(1).max(256),
+  layout:z.enum(['none','all']).default('none').describe('all explicitly permits whole-graph layout; none preserves existing coordinates.'),
+  cleanupNodeIds:z.array(id).max(256).optional().describe('Only these explicitly authorized candidates may be removed if proven unused; other disconnected nodes are preserved.'),
+  requestId:z.string().uuid()
+}).strict();
 export const knowledgeSchema = z.object({tool:z.enum(['project_status','project_context','project_search','graph_query','graph_feature','graph_impact','read_source','validate_evidence','read_asset_snapshot','search_asset_snapshots','asset_snapshot','inspect_asset','experience_lookup']),arguments:mcpArguments.default({})}).strict();
 export const knowledgeRecordSchema = z.object({tool:z.enum(['remember_evidence','experience_save','experience_feedback']),arguments:mcpArguments,requestId:z.string().uuid()}).strict();
 export const imageRegionSchema=z.object({x:z.number().int().min(0),y:z.number().int().min(0),width:z.number().int().min(1).max(16384),height:z.number().int().min(1).max(16384)}).strict();
+const rgbSchema=z.tuple([z.number().int().min(0).max(255),z.number().int().min(0).max(255),z.number().int().min(0).max(255)]);
+export const imageAnalyzeSchema=z.object({
+  imagePath:z.string().min(1).max(2048).describe('Absolute local PNG, JPEG, or WebP path. Original image is never changed.'),
+  region:imageRegionSchema.optional().describe('Optional region in the EXIF-oriented source image, without resizing.'),
+  samples:z.array(z.object({x:z.number().int().min(0),y:z.number().int().min(0)}).strict()).max(64).default([]).describe('Pixel coordinates in the EXIF-oriented source image; each must lie within the selected region.'),
+  alphaThreshold:z.number().int().min(0).max(254).default(0).describe('Bounds and coverage use alpha strictly greater than this byte value; this is not semantic segmentation.'),
+  backgrounds:z.array(rgbSchema).max(4).default([]).describe('Optional opaque sRGB backgrounds. Composition statistics are separate from unassociated source RGBA.'),
+  includeAlphaHistogram:z.boolean().default(false)
+}).strict();
 export const visualCaptureSchema=z.object({source:z.literal('editor').default('editor'),targetPath:z.string().min(1).max(1024).optional(),region:imageRegionSchema.optional(),fullViewport:z.boolean().default(false),padding:z.number().int().min(0).max(256).default(8)}).strict().superRefine((value,ctx)=>{
   if(Number(!!value.targetPath)+Number(!!value.region)+Number(value.fullViewport)>1)ctx.addIssue({code:'custom',message:'Choose targetPath, region, or fullViewport, not several capture targets'});
 });

@@ -57,7 +57,8 @@ test('tool wrappers stop one exhausted issue while diagnostic reads and independ
   const f=await fixture(t,{guardMaxRepairAttempts:1,guardMaxRepeatedErrors:50});
   f.bridge.sessions.set(f.session.id,'editor');
   let writes=0;
-  f.bridge.mcpCallToolset=async(_s,args)=>{
+  f.bridge.mcpCallToolset=async(_s,args,_signal,admit)=>{
+    await admit();
     if(args.toolName==='get_properties')return {value:1};
     writes++;throw new BridgeError('MCP_TOOL_ERROR',`Synthetic edit failure ${writes}`,{rollback:'not_available'});
   };
@@ -99,7 +100,7 @@ test('knowledge queries and writes use live timeout snapshots, and cache endpoin
 test('repeated malformed write calls share the same issue instead of escaping through new request IDs',async t=>{
   const f=await fixture(t,{guardMaxRepeatedErrors:2});
   f.bridge.sessions.set(f.session.id,'editor');
-  let dispatched=0;f.bridge.mcpCallToolset=async()=>{dispatched++;return {};};
+  let dispatched=0;f.bridge.mcpCallToolset=async(_s,_args,_signal,admit)=>{await admit();dispatched++;return {};};
   const args={toolsetName:'editor_toolset.toolsets.object.ObjectTools',toolName:'set_properties',arguments:{instance:{refPath:'/Game/A.A'}},requestId:'not-a-uuid'};
   for(let i=0;i<2;i++)assert.equal((await f.execute('unreal_mcp_call_toolset',{...args,requestId:`invalid-${i}`})).error.code,'MCP_INVALID_ARGUMENTS');
   assert.equal((await f.execute('unreal_mcp_call_toolset',{...args,requestId:randomUUID()})).error.code,'REPAIR_BUDGET_EXHAUSTED');

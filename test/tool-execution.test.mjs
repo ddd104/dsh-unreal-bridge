@@ -70,12 +70,13 @@ test('ObjectTools write failure reaches the model, then read-back and corrected 
   ];
   const socket=new WebSocket(f.bridge.descriptor.url,{headers:{Authorization:`Bearer ${f.bridge.token}`}});
   await once(socket,'open');const ack=once(socket,'message');
-  socket.send(JSON.stringify({type:'hello',protocol:1,editorId:'editor',project:'fixture',projectPath:'/tmp/fixture',engineVersion:'5.8',pid:42,capabilities:['mcp_tools','mcp_target_validation']}));
+  socket.send(JSON.stringify({type:'hello',protocol:1,editorId:'editor',project:'fixture',projectPath:'/tmp/fixture',engineVersion:'5.8',pid:42,capabilities:['mcp_tools','mcp_target_validation','mcp_operation_context']}));
   await ack;f.bridge.bind('chat','editor');
   socket.on('message',raw=>{
     const request=JSON.parse(raw);if(request.type!=='request')return;
     let result;
     if(request.method==='mcp_discover')result={content:[{type:'text',text:JSON.stringify({tools:schemas})}]};
+    else if(request.method==='mcp_operation_context')result={verified:true,toolName:`${toolsetName}.${request.params.arguments.tool_name}`,blueprintOwners:[{path:'/Game/BP_Manager.BP_Manager',classPath:'/Script/Engine.Blueprint'}],token:randomUUID()};
     else{
       const {tool_name,arguments:args}=request.params.arguments;
       calls.push({name:tool_name,args});
@@ -110,7 +111,8 @@ test('ObjectTools write failure reaches the model, then read-back and corrected 
   assert.equal(state.executionSafety.budgetExhausted,false);
   const {problem,...lastError}=state.executionSafety.lastError;
   assert.deepEqual(lastError,{code:'MCP_TOOL_ERROR',message:original,rollback:'not_available',recovery:'verify_before_retry'});
-  assert.equal(problem.family,'object_properties');
+  assert.equal(problem.family,'blueprint_edit');
+  assert.equal(problem.target,'/game/bp_manager.bp_manager');
   assert.equal(state.executionSafety.repairs.issues[0].status,'resolved');
   assert.equal(f.cancellations.length,0);
 });

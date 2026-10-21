@@ -1,5 +1,84 @@
 # 本机验证记录
 
+## 2026-10-21 模型参数恢复与等待计时
+
+- 最新失败会话的材质补丁含一个多余的 `}`，DSH 在工具派发前以 `MALFORMED_RESPONSE` 结束；本次新增独立 `model-recovery` 模块，通过官方 `agent/request-error` 接口在当前 UE 任务中有限重新生成。默认每轮 2 次，设置可关闭；原始失败参数保持不变，已执行工具不重放，原预算及写保护继续生效。
+- 计时改为扣除官方问题请求的纯等待区间，并行工具工作时仍计时。回答、异常或取消后恢复剩余预算；状态显示等待及暂停时间。实际安装的 DSH `0.2.1-rc.2` 问题服务实测：等待 125ms 超过测试期限 80ms 未被取消，回答后按原剩余时间恢复。记录 `.test-state/wait-budget-runtime-check.stdout`。
+- 构建通过，JavaScript 全套 **354/354** 通过；其中模型参数恢复新增 6 组、等待计时新增 8 组。材质指引补充显式通道、精确 schema、完整可编译批次、真实预览编号及材质/组件赋值/地图保存的独立检查，技能结构及引用检查通过。
+- 新增 `scripts/model-recovery-session-check.mjs`，使用真实安装的 AgentLoop、Session 校验器及 JSONL 后端完成 **7/7** 场景：同一步重新生成、每轮上限、关闭、非 UE 参数不恢复、预算未激活或已耗尽不恢复、下一轮重新计数。验证失败响应中的合法兄弟调用也不执行、先前成功操作不重放、修正补丁只执行一次，以及提示的冷读恢复和回放。构建报告 `.test-state/model-recovery-session-built.json`。
+- 最终构建通过实际 DSH 的 MCP **7/7**、设置/生命周期 **8/8**、会话/执行保护 **8/8**，报告 `.test-state/task-recovery-{mcp,settings,session}-runtime.json`。全部使用离线适配器、临时状态及模拟工具；没有在线模型请求或真实 UE 业务资产修改，不代表原材质业务任务已经完成。
+- 本次安装仅更新宿主及三份材质技能 Markdown，无需重新编译 UE。安装备份、哈希和自定义偏好保留记录见 `.test-state/task-recovery-installed.json`、`.test-state/task-recovery-skill-installed.json`；DSH 完整退出后重开加载新宿主，旧会话需重新加载材质技能。
+
+## 2026-10-21 材质 skill 的通用细节检查
+
+- 将入口和两份参考文档从偏重二维图形的描述改为按当前目标选择空间分布、表面响应、覆盖合成和时间/驱动特征。移除分段圆与径向孔洞的案例公式，保留共享约束、明确排除条件和主动纠偏方法；示例不作为所有材质的必查项。区分图案、数据贴图和受光照片，避免直接从最终像素推导 PBR 输入。
+- 动态验收按周期、一次性和事件驱动选择证据。既有实例参数定值保持局部流程，临时测试后恢复本任务要求的最终值。独立代理的只读方案演练覆盖纵向拉丝金属、1.5 秒一次性溶解和实例 Roughness 定值，均按各自范围处理；这些是技能行为检查，没有调用 UE 或完成对应效果的渲染验收。
+- 源版与 EHV 安装版格式检查通过，三个 Markdown 已同步，原 Custom/HLSL 项目偏好原样保留。安装及备份记录 `.test-state/material-general-skill-installed.json`；实际 DSH 运行时加载通过，记录 `.test-state/material-general-skill-runtime.json`。本次仅更新技能与验证记录，没有更新宿主/原生二进制或业务资产；旧会话重新调用 `/ue-material-workflow` 读取最新内容。
+
+## 2026-10-21 材质编辑器同步、撤销与失败恢复
+
+- 根据最新 `70d46a25-2194-46d8-ba40-258aaab356b1` 会话，区分了失败后另建的正式材质、正常 transient 编译副本，以及已有编辑器未同步的问题。诊断记录 `.test-state/radar-latest-audit.txt`。
+- 原生提交现在检查未应用的编辑器改动，在成功且内容变化后刷新目标工作副本，按解析后的 GUID 在副本图内定位并选中整批节点。`MATERIAL_EDITOR_CONFLICT` 在原资产写入前拒绝，已应用但未保存的资产仍可继续；预览、失败与 no-op 不刷新。另修复带连字符与紧凑 GUID 的匹配差异。
+- 独立审查补查 Undo/Redo：引擎材质编辑器会从旧副本写回原资产。原生材质批次使用独立事务上下文，在撤销/重做期间临时抑制该回调，恢复先前标志后延迟同步目标，补齐图引脚清理、视口和全局通知，保护无关窗口及未应用编辑。仅作用于桥接材质事务，模块关闭会清理监听。
+- `npm run check` 构建及 **340/340** 项宿主测试通过，日志 `.test-state/material-presentation-host-check.log`。恢复结果携带禁止同一失败任务换名/复制重建的明确约束；真实资产之间仍独立，未声称已硬性识别跨资产语义任务。编辑器冲突有独立恢复指引且不消耗问题修复额度；停止及状态查询不再提示换 UUID 重试。
+- 实际 DSH 0.2.1-rc.2 运行时的 MCP **7/7**、会话执行保护 **8/8** 组验证通过，记录 `.test-state/material-presentation-{mcp,session}-runtime.json`。工具检查使用构建产物，会话检查使用工作区执行保护源码；采用模拟编辑器和离线模型适配器，没有在线模型请求。
+- UE 5.8.2 隔离 HostProject 的逐文件编译和强制 Unity 编译均通过；显式使用 `-DisableUnity` 与 `-ForceUnity -DisableAdaptiveUnity`，核对真实 Unity 输入包含本次修改文件，未把零操作构建算作 Unity 验证。日志 `.test-state/material-presentation-{nonunity,unity}-build.log`，53 份源码哈希清单 `.test-state/material-presentation-native-sources.json`。
+- 真实 D3D12 SM5、Slate 材质编辑器回归 **20/20** 通过，错误 0（包含一项已有的预期查询警告）。包括先开空材质再提交、可见节点/GraphNode/GUID/批量选中、连续更新、编辑器冲突、dry-run/no-op、撤销/重做、函数调用者手改保护，以及普通事务通知和既有 suppression 所有权。报告 `.test-state/material-presentation-native-report/index.json`；不是 NullRHI 或仅验证调用次数。
+- skill 三文件已更新，分别验收编译、参数行为与默认外观，并补充可测量细节、正确材质提交路径、单一交付目标及保存/草稿收尾。源版和 EHV 安装版格式验证通过；独立只读场景测试覆盖参考图、额度耗尽和 MI 局部改值。实际 DSH 技能加载验证通过，`.test-state/material-workflow-skill-runtime.json`；安装与备份 `.test-state/material-workflow-skill-installed.json`，原有 Custom/HLSL 项目偏好原样保留。
+- 已安装到 DSH `desktop` 和 EHV，安装记录 `.test-state/material-presentation-installed.json` 为 **PASS**。宿主六个入口文件与工作区哈希一致，UE 更新五个源码/头文件及 DLL/PDB，共七个文件；备份编号 `20261021-142123-052-material-presentation`，备份路径见安装记录。profile 配置、本地 `dsh-emotion` 及已安装项目 skill 保留。宿主 bundle SHA-256 为 `3f74b24d5cedcb41fa70c56cea149e0ac264c12f90cf895add2d17f7efc9649f`，原生 DLL 为 `87489b6b962a41514ccc4cf04bffeea8d054109420545c7406cf92ef91e5ef3d`。
+- 安装后使用实际安装的最终 bundle 再验证 MCP **7/7**、会话执行保护 **8/8** 及 EHV 技能发现/加载，全部通过；记录 `.test-state/material-presentation-installed-{mcp,session,skills}-runtime.json`，三份报告均对应上述宿主哈希。检查没有在线模型请求或业务资产写入。未自动关闭用户应用；DSH 需要完整退出后重开，EHV 下次打开加载新原生插件，旧会话需重新调用 `/ue-material-workflow`。
+- 本次测试没有修改 EHV 的业务材质或地图，也没有复跑原模型生成任务；因此不把流程改进描述成原业务效果已完成视觉验收。
+
+## 2026-10-21 材质效果理解与验收流程优化
+
+- 根据 `M_RadarRingFan` 会话的源 RGBA、正式补丁及完整回读，确认白盘与错位来自生成的材质设计，而非透明度上传丢失或节点写入错误。溯源记录 `.test-state/radar-material-audit.txt`，逐项核对 `.test-state/radar-bridge-verification.json`。
+- 更新 `ue-material-workflow/SKILL.md` 与两个参考文档。首次构建前明确可见内容、部件关系、参数行为和验收条件；关键透明度/几何判断保留在入口中，适用参考仍须实际读取。文字明确要求优先，默认值区分事实与估计；新增共享边界、真实内孔/间隙、颜色与覆盖率、UE Sine 周期单位的检查。按原要求逐项验收，保留局部参数修改的简短流程。
+- 两个无历史上下文的独立代理执行了四种任务的离线行为检查：原图效果理解、实例标量局部修改、文字覆盖参考图并依次点亮能量条、接触点水波扩散。原图检查正确识别黑色 20% 不透明中心并共享分段几何；其余任务保留用户范围、覆盖文字优先和时间单位。根据检查补充“停止闪烁不等于隐藏”，减少可推导默认值上的重复提问。这些是设计阶段检查，不是 DeepSeek 或 UE 渲染端到端验收。
+- 仓库及 EHV 两份技能的格式检查通过，引用路径存在。仅同步 EHV 的三个技能 Markdown，保留安装版原有两条 Custom/HLSL 项目偏好，并说明独立 HLSL 必须有实际受支持的接入方式；原文件已备份。安装清单及哈希 `.test-state/material-intent-skill-installed.json`。
+- 使用实际安装 DSH 的官方运行时解析、文件系统和 SkillRegistry 加载 EHV 技能，发现、正文即时刷新、项目隔离、引用文件校验全部通过；记录 `.test-state/material-intent-skill-runtime.json`。未修改宿主/UE 二进制、业务材质或地图，无需重启；历史会话已加载的旧正文仍需重新调用技能。没有复跑在线 DeepSeek 或宣称原材质已修复。
+
+## 2026-10-21 EHV Unity 编译失败修复（UE 0.5.1）
+
+- 用户在 EHV 重新编译后发现 UE 插件报错，现场日志已保留为 `.test-state/ehv-material-unity-failure.log`。根因是 Unity 把全部实现文件合并到一个翻译单元；新材质代码与蓝图代码的 `Obj/Str`、数据表代码的 `MaxSnapshotBytes` 在匿名命名空间中重定义，后续类型错误均由此引发。
+- 前次隔离构建日志明确显示 25 个实现/测试文件都被 Adaptive Build 排除出 Unity，因而此前编译和运行时测试没有覆盖本次失败的构建方式。这是原生构建验收的遗漏。材质内部辅助函数、类型和常量现统一放入独立私有命名空间，对外方法仅使用限定名和函数局部引入；未通过禁用工程 Unity 绕过问题。
+- 修复同步到仓库与 EHV，UE 描述版本提升至 **0.5.1 / Version 11**。使用用户原来的 `EHVEditor Win64 Development` 完整构建命令，实际编译 `Module.DSHUnrealBridge.cpp`，其中包含全部实现文件；编译、链接及元数据生成通过，耗时 **31.57 秒**。日志 `.test-state/ehv-material-unity-build.log`。EHV 的新 DLL 由本次工程构建生成，SHA-256 为 `db108c453804791bdae3321f5cedbd4792fad693f277659def2112dc30a53638`。
+- 同步相同源码后，隔离 HostProject 的逐文件 `DSHMaterialOps.cpp` 编译和完整目标链接也通过，日志 `.test-state/material-unity-fix-nonunity-build.log`。README 的发布验证要求已补齐两种构建模式，并要求检查真实编译输入，避免把 Adaptive Build 的排除结果算作 Unity 覆盖。
+- 修复后隔离工程的 D3D12 SM5 原生回归 **12/12** 通过（10 项 MaterialBatch、2 项 WriteCoordination，错误 0；1 项包含预期的不存在目标查询警告），进程退出码 0。报告 `.test-state/material-unity-fix-native-report/index.json`，日志 `.test-state/material-unity-fix-native-automation.log`。测试仅运行在隔离工程；EHV 的验证为真实完整目标构建。最终安装记录 `.test-state/ehv-material-unity-fix-installed.json`。
+- 原插件源码、描述文件和二进制备份至 `F:\UE5Project\EHV\Saved\DSHUnrealBridgeBackups\20261021-101424-446-unity-fix\DSHUnrealBridge`。EHV 工程文件、知识配置、技能及 3837 个缓存文件再次哈希校验保持原样，没有改动业务资产。本次修复仅涉及 UE 端，宿主仍为 0.6.0。
+
+## 2026-10-21 材质流程与蓝图修复保护安装（宿主 0.6.0 / UE 0.5.0）
+
+- 按用户要求，已通过官方 CLI 将 `desktop` profile 的宿主升级至 **0.6.0**，EHV 插件升级至 **0.5.0 / Version 10**。包括通用材质技能、三个材质/图像工具，以及蓝图节点、连线和 ObjectTools 共享真实资产修复范围的修复。
+- 发布版本重新执行 `npm run check`，**336/336** 通过，日志 `.test-state/material-blueprint-release-check.log`。UE 使用此前已验证的隔离 HostProject 二进制；全部 **53 个**原生源码文件与构建输入哈希相同，描述文件仅提升版本，不更改原生代码。引擎及模块 BuildId 均为 `717ce51e-7d91-490e-b61d-b7032ba4bce8`，未使用工作区旧 DLL。
+- 安装后核对宿主六个关键文件及 UE **259 个**交付文件，哈希全部一致，其中实际更新 UE 文件 **16 个**。安装清单 `.test-state/material-blueprint-install-plan.json`，结果 `.test-state/material-blueprint-installed.json`。DSH bundle SHA-256 为 `2ab8abc46285045d65cabbcbf26fd0db7c984ad1c3d61da55a1c1210eeeafd1a`。
+- 使用已安装 DSH 0.2.1-rc.2 的正式运行时加载实际安装 bundle：MCP **7/7**、设置及生命周期 **8/8**、会话及执行保护 **8/8** 通过，记录 `.test-state/material-blueprint-installed-{mcp,settings,session}-runtime.json`。这些检查使用临时状态、模拟编辑器及离线模型适配器，没有在线模型请求或真实项目写入。已安装 sharp **0.35.5** 的 PNG 编解码验证保留源 RGBA，记录 `.test-state/material-blueprint-installed-dependencies.json`。
+- 实际安装 bundle 经官方 `createRuntimeResolution/PluginPackages` 解析后，真实技能加载器成功发现并读取 EHV 的 `ue-material-workflow` 及原有 `sr-proto-handler/ue-project-graph`；两个相对引用文档均存在且非空，工程边界隔离检查通过。记录 `.test-state/material-blueprint-installed-skills-runtime.json`。首轮裸导入缺少宿主提供的 peer 包，按正常宿主解析流程验证即通过，未为测试更改安装依赖。
+- 备份编号 **20261021-094932-431**：DSH 旧包及配置位于 `C:\Users\NiubilityPC\.dsh\profiles\desktop\.plugin-manager\dsh-unreal-bridge-backups\20261021-094932-431`；UE 被替换文件位于 `F:\UE5Project\EHV\Saved\DSHUnrealBridgeBackups\20261021-094932-431\DSHUnrealBridge`。原 profile 配置、EHV 工程文件、知识配置、**3837 个缓存文件**和 **2 个原有技能文件**保持原样。官方安装器移入 `.ignored` 的本地 `dsh-emotion` 已恢复，4 个文件哈希一致。
+- 本次未关闭用户应用、启动 EHV 或修改工程资产。DSH 正在运行的进程尚未确认重载，需完整退出并重新打开；EHV 下次打开加载新插件。原业务材质的视觉及动态效果、模型任务耗时和 Token 降幅仍未实测。
+
+## 2026-10-21 蓝图修复额度的跨工具归属修复（工作区实现）
+
+- 修复两个已复现缺口：`connect_pins/break_pins/set_pin_value` 的嵌套 PinID 曾被归到 `editor_scope`，而新增节点归到蓝图；ObjectTools 的节点属性修改又被归到独立对象，导致连线被限制后仍能加节点或换入口继续修改。
+- 新增内部只读 `mcp_operation_context` 预检及对应能力声明，不增加模型工具数量。宿主等待原生确认真实 Blueprint、图、节点、生成类或已有 CDO 的归属后才登记修复额度；关卡蓝图保留完整对象路径，普通场景实例不推断成其类蓝图。目标必须已经加载。按连接保存的短期 token 绑定调用参数及弱对象身份，实际执行前复核，拒绝同名替换、归属变化和跨连接使用；旧插件缺少能力时明确拒绝 BlueprintTools/ObjectTools 调用。
+- 保留严格引脚校验，但把索引/方向判定放在归属已确认后的派发前阶段，使无效引脚错误计入正确蓝图。token 不参与幂等哈希，预检和派发前拒绝不消费写请求编号。修复全部受支持调用包装的一致性；缓存失败回放不重复消耗修复额度，也不重新派发写入。
+- 原生与宿主精确只读名单增加 BlueprintTools 的 `get_default_object/list_graphs/find_nodes/get_node_infos` 和 ObjectTools 的 `get_class/get_properties/list_properties`。独立审计确认 `read_graph_dsl/get_node_type_pins` 会临时增删真实节点，未给予只读豁免；删除不存在方法名的诊断豁免。
+- `npm run check` 构建及 **336/336** 项 JavaScript 测试通过，日志 `.test-state/blueprint-scope-host-check.log`。新增集成测试覆盖同蓝图跨工具/节点封禁、八种调用包装、其他资产继续、诊断不重置额度、关卡蓝图、非法证据、A→B→A 绑定变化、缓存回放、超时恢复和 token 重试；原有材质与设置测试保持通过。
+- 实际安装 DSH 0.2.1-rc.2 的 ToolRuntime 使用最终宿主 bundle 完成 **7/7** 组检查，记录 `.test-state/blueprint-scope-mcp-runtime.json`。使用隔离状态及模拟编辑器，没有调用模型或修改已安装 profile；同时验证精简安全返回和 `unreal_state` 完整状态均通过真实输出校验。
+- UE 5.8.2 隔离 HostProject 完整 Editor 目标编译成功，日志 `.test-state/blueprint-scope-native-build-final.log`。真实 UE 自动化 **15/15** 通过，包括新增 `McpOperationContext` 四项和原有目标校验、关卡蓝图、展示保护及写入协调；真实 WebSocket 桥接 **6/6** 组验收通过。记录 `.test-state/blueprint-scope-e2e/result.json`、同目录 `editor.log` 与 `native-report-*`。本轮使用 NullRHI 验证身份及执行保护，不将其描述为材质渲染或视觉验收。
+- 本次更新工作区源码、文档和构建产物，**未安装到 DSH desktop 或 EHV，未修改 EHV 资产，未关闭用户应用**。实际生效需要更新宿主和 UE 插件并重新加载；没有原业务模型复跑的耗时或 Token 降幅数据。
+
+## 2026-10-20 通用材质 skill、源图分析与批量编辑（工作区实现）
+
+- 先将流程要求整理为 `ue-material-workflow`，再实现工具支持。技能适用于材质、普通材质函数和实例，按任务启用参考图、图构建或动态验收分支；小范围参数修改不强制重建图。默认值来源、单位、失败后诊断、图维护和完成证据均有明确要求，没有绑定特定项目、形状或颜色。
+- 新增 `unreal_image_analyze`，通过 DSH 文件系统服务分析源 RGBA、透明度、指定样本和显式底色合成，保留源文件并把报告纳入受管缓存。新增 `unreal_material_read/patch`：读取精确引脚与完整编辑数据版本，在临时副本上检查、编译整批修改，显式提交后核验结果；失败恢复原有内存状态及 dirty 标记，不自动保存。排版和候选清理须显式指定。
+- MaterialTools 的节点新增、连线等操作共享材质修复范围；原生读取证实归属后，相关 ObjectTools 属性修改也进入该范围。八项已审计材质查询在宿主及原生层保持只读。普通工具返回压缩重复安全历史，当前错误、请求状态、回滚和剩余额度保留；`unreal_state` 和界面仍提供完整记录。
+- `npm run check` 构建及 **306/306** 项 JavaScript 测试通过，报告 `.test-state/material-host-check-final.log`。新增图像测试覆盖隐藏 RGB、各 EXIF 方向、PNG/JPEG/WebP、区域坐标、透明度合成、非法数据、取消和缓存清理；材质测试覆盖默认预览、只读模式、审批、请求去重、跨对话写保护、未知结果恢复、未核验提交锁定及可信归属。独立审查未发现剩余阻塞问题。
+- skill 格式检查通过；使用实际安装 DSH 的 Cordis、文件系统和技能加载器，从隔离 HostProject 成功发现并读取新增技能。记录 `.test-state/material-skill-runtime-check.json`。检查使用工作区构建产物和临时工程，没有改动已安装插件或运行模型。
+- UE 5.8.2 隔离 HostProject 完整 Editor 目标构建成功，日志 `.test-state/material-native-build-final.log`；参与最终构建的五份原生源码与工作区文件哈希一致。真实 D3D12 SM5 自动化 **12/12** 成功，包括 10 项 MaterialBatch 和 2 项 WriteCoordination；报告 `.test-state/material-native-report-final/index.json`，日志 `.test-state/material-native-automation-final.log`。其中 1 项带有故意查询不存在蓝图的警告，错误总数为 0。未使用 NullRHI 代替着色器编译。
+- 原生验证覆盖项目/插件挂载、引脚预检、预览/提交/清理/注释/撤销、Custom 输入扩展保留连接、普通函数与递归拒绝、UI 材质、真实无效 HLSL 拒绝，以及保留未保存修改和拥有的子对象后恢复。版本测试覆盖软引用、Map/Set 及超过显示上限的数组。函数调用者测试验证：接口变更在写入前拒绝，内部修改能更新已编译调用材质且保留连接，注入失败后函数和调用者状态仍完整。
+- 当前批次范围为普通 `UMaterial/UMaterialFunction`；不支持材质层/混合函数、复合/嵌套/执行引脚图和跨资产函数接口迁移。材质实例使用编辑器已有参数工具。函数预览编译不覆盖所有调用场景；Map/Set 参与读取与恢复，但不支持直接写入。具体限制见工具协议。
+- **本次仅完成工作区源码、宿主 bundle 和隔离工程编译验证，未安装到 DSH desktop 或 EHV，未关闭用户应用，未修改 EHV 资产。** 生效需要更新两端插件并重新加载。没有复跑原业务的模型生成、视觉对照或动态效果验收，因此不宣称原材质已修复，也没有修复后端到端耗时或 Token 降幅的实测数字。
+
 ## 2026-10-20 全局设置入口补齐（0.5.1）
 
 - 纠正 0.5.0 只提供插件详情页配置、未接入全局设置的问题，新增 **设置 → Unreal Bridge**。两个入口复用同一个官方 `configForms` 控制器及配置 revision；支持加载错误重试、只读、草稿保留和并发修改保护。

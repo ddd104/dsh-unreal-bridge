@@ -31,6 +31,27 @@ test('zero repair allowance stops correction after the initial failure',()=>{
   assert.equal(subject.admit(operation({kind:'read'})),null);
 });
 
+test('problem denial preserves the failed target and distinguishes a replacement from independent requested work',()=>{
+  const subject=tracker({guardMaxRepairAttempts:0});
+  const material=operation({target:'/Game/M_Delivery',family:'material_edit'});
+  fail(subject,material);
+  assert.throws(()=>subject.admit(material),failure=>{
+    assert.equal(failure.code,'REPAIR_BUDGET_EXHAUSTED');
+    assert.equal(failure.details.problem.target,'/Game/M_Delivery');
+    assert.equal(failure.details.recovery,'stop_problem');
+    assert.equal(failure.details.recoveryConstraints.retainTarget,true);
+    assert.equal(failure.details.recoveryConstraints.retainDiagnostics,true);
+    for(const workaround of ['rename_target','duplicate_target','rebuild_replacement'])
+      assert.ok(failure.details.recoveryConstraints.prohibitedWorkarounds.includes(workaround));
+    assert.equal(failure.details.recoveryConstraints.independentWork,'already_requested_unrelated_work');
+    assert.equal(failure.details.recoveryConstraints.resumeSameProblem,'new_user_turn');
+    assert.match(failure.message,/不得靠换名新建、复制或重建替代资产/);
+    return true;
+  });
+  assert.ok(subject.admit(operation({target:'/Game/M_Independent',family:'material_edit'})),
+    'Native identity alone cannot prove that a different target is a replacement');
+});
+
 test('changing request identity or casing cannot reset a problem and identical UUID-bearing errors repeat',()=>{
   const subject=tracker();
   fail(subject,operation(),error('Cannot connect request 12345678-1234-1234-1234-123456789abc'));
@@ -96,7 +117,7 @@ test('parallel corrections reserve attempts atomically and completion can only b
 });
 
 test('unknown outcomes and unsafe state remain the responsibility of the editor write barrier',()=>{
-  for(const code of ['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN','BUSY','EDITOR_BUSY','ROLLBACK_FAILED','EDITOR_WRITE_LOCKED']){
+  for(const code of ['TIMEOUT','CANCELLED','DISCONNECTED','OUTCOME_UNKNOWN','BUSY','EDITOR_BUSY','ROLLBACK_FAILED','EDITOR_WRITE_LOCKED','MATERIAL_EDITOR_CONFLICT']){
     const subject=tracker();fail(subject,operation(),error('Protected state',code));
     assert.equal(subject.status().total,0,code);
   }
@@ -105,7 +126,7 @@ test('unknown outcomes and unsafe state remain the responsibility of the editor 
 });
 
 test('permission denials and write-barrier races do not spend correction attempts',()=>{
-  for(const code of ['OUTCOME_UNKNOWN','BUSY','EDITOR_BUSY','EDITOR_WRITE_LOCKED','READ_ONLY','PERMISSION_DENIED','APPROVAL_UNAVAILABLE']){
+  for(const code of ['OUTCOME_UNKNOWN','BUSY','EDITOR_BUSY','EDITOR_WRITE_LOCKED','MATERIAL_EDITOR_CONFLICT','READ_ONLY','PERMISSION_DENIED','APPROVAL_UNAVAILABLE']){
     const subject=tracker({guardMaxRepairAttempts:1});fail(subject);
     const correction=subject.admit(operation());subject.complete(correction,{code,message:'Not dispatched'});
     assert.equal(subject.status().attemptsUsed,0,code);

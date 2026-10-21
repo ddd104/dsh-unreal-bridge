@@ -22,13 +22,13 @@ async function fixture(t,config={}){
   t.after(async()=>{await bridge.close();await rm(stateDir,{recursive:true,force:true});});
   return bridge;
 }
-async function editor(bridge,id,handler,capabilities=['mcp_tools','mcp_target_validation']){
+async function editor(bridge,id,handler,capabilities=['mcp_tools','mcp_target_validation','mcp_operation_context']){
   const socket=new WebSocket(bridge.descriptor.url,{headers:{Authorization:`Bearer ${bridge.token}`}}),calls=[];
   await once(socket,'open');const ack=once(socket,'message');
   socket.send(JSON.stringify({type:'hello',protocol:1,editorId:id,project:id,projectPath:`/tmp/${id}`,engineVersion:'5.8',pid:42,capabilities}));await ack;
   socket.on('message',async raw=>{
     const message=JSON.parse(raw);if(message.type!=='request')return;calls.push(message);
-    const response=await handler(message);
+    const response=message.method==='mcp_operation_context'?ok({verified:true,toolName:message.params.name==='call_tool'?`${message.params.arguments.toolset_name}.${message.params.arguments.tool_name}`:message.params.name,blueprintOwners:[],token:randomUUID()}):await handler(message);
     if(response!==undefined)socket.send(JSON.stringify({type:'response',id:message.id,...response}));
   });
   return calls;

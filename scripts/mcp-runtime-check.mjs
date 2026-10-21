@@ -71,7 +71,7 @@ try{
   const ueError={isError:true,content:[{type:'text',text:'资产不存在 / DataTable not found: /Game/Missing'}]};
   const socket=new WebSocket(bridge.descriptor.url,{headers:{Authorization:`Bearer ${bridge.token}`}});
   await once(socket,'open');const ack=once(socket,'message');
-  socket.send(JSON.stringify({type:'hello',protocol:1,editorId:'offline-editor',project:'OfflineMcpRuntime',projectPath:tempRoot,engineVersion:'5.8',pid:42,capabilities:['mcp_tools','mcp_target_validation']}));await ack;
+  socket.send(JSON.stringify({type:'hello',protocol:1,editorId:'offline-editor',project:'OfflineMcpRuntime',projectPath:tempRoot,engineVersion:'5.8',pid:42,capabilities:['mcp_tools','mcp_target_validation','mcp_operation_context']}));await ack;
   const dispatches=[];
   socket.on('message',raw=>{
     const message=JSON.parse(raw);if(message.type!=='request')return;
@@ -80,6 +80,7 @@ try{
       const toolset=message.params.arguments.toolset_name;
       result=toolset==='BadDescription'?{content:[{type:'text',text:'not JSON'}]}:toolset==='FailedDescription'?ueError:toolset===OBJECT?objectDescription:describe('get_schema');
     }else if(message.method==='mcp_list_tools')result={tools:[]};
+    else if(message.method==='mcp_operation_context')result={verified:true,toolName:`${message.params.arguments.toolset_name}.${message.params.arguments.tool_name}`,blueprintOwners:[],token:randomUUID()};
     else{
       dispatches.push(message);
       const {toolset_name:toolset,tool_name:tool,arguments:parameters}=message.params.arguments;
@@ -118,7 +119,8 @@ try{
   assert.deepEqual(failed.value.error.details.ueResult,ueError);
   assert.equal(failed.value.error.details.retryable,true);
   assert.equal(failed.value.error.details.recovery,'correct_and_retry');
-  assert.equal(failed.value.executionSafety.errors,1);
+  assert.equal(failed.value.executionSafety.error.code,'MCP_READ_ERROR');
+  assert.equal((await read.execute('unreal_state',{})).value.executionSafety.errors,1);
   assert.equal(read.cancellations.length,0);assert.equal(read.controller.signal.aborted,false);
   const corrected=await read.execute('unreal_mcp_call_toolset',callArgs());
   assert.equal(corrected.isError,false,JSON.stringify(corrected));assert.equal(corrected.value.ok,true);assert.equal(corrected.value.schema.rowStruct,'FObstacle');
@@ -133,8 +135,8 @@ try{
   assert.equal(rejected.value.error.details.retryable,true);
   assert.equal(rejected.value.error.details.rollback,'not_available');
   assert.equal(rejected.value.error.details.recovery,'verify_before_retry');
-  assert.equal(rejected.value.executionSafety.errors,1);
-  assert.equal(rejected.value.executionSafety.lastError.code,'MCP_TOOL_ERROR');
+  assert.equal(rejected.value.executionSafety.error.code,'MCP_TOOL_ERROR');
+  assert.equal((await write.execute('unreal_state',{})).value.executionSafety.errors,1);
   assert.equal(write.cancellations.length,0);assert.equal(write.controller.signal.aborted,false);
   const readback=await write.execute('unreal_mcp_call_toolset',objectCall('get_properties'));
   assert.equal(readback.isError,false);assert.equal(readback.value.ok,true);
@@ -175,7 +177,7 @@ try{
 
   const level=fixture('offline-level-capability'),beforeLevel=dispatches.length;
   const state=await level.execute('unreal_state',{});
-  assert.deepEqual(state.value.executionSafety.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000,guardMaxRepairAttempts:3,guardMaxRepeatedErrors:2});
+  assert.deepEqual(state.value.executionSafety.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000,guardMaxRepairAttempts:3,guardMaxRepeatedErrors:2,guardMaxMalformedRetries:2});
   assert.equal(state.value.blueprintSupport.levelBlueprintLookup,false);
   checkedError(await level.execute('unreal_level_blueprint',{mapPath:'/Game/Maps/Map_Test'}),'LEVEL_BLUEPRINT_LOOKUP_UNAVAILABLE');
   checkedError(await level.execute('unreal_read_blueprint',{assetPath:'/Game/Maps/Map_Test.Map_Test:PersistentLevel.Map_Test'}),'LEVEL_BLUEPRINT_REQUIRES_LOOKUP');

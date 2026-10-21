@@ -3,7 +3,8 @@ import {writeFile,copyFile,stat} from 'node:fs/promises';
 import {join,isAbsolute} from 'node:path';
 import sharp from 'sharp';
 import {compareImages} from './visual-compare.mjs';
-import {visualCaptureSchema,visualCompareSchema,fail} from './protocol.mjs';
+import {analyzeImage} from './image-analyze.mjs';
+import {visualCaptureSchema,visualCompareSchema,imageAnalyzeSchema,fail} from './protocol.mjs';
 import {CacheManager} from './cache-manager.mjs';
 import {DEFAULTS} from './settings-spec.mjs';
 
@@ -169,6 +170,27 @@ export class VisualService {
       if(this.bridge.target(sessionId).editorId!==capture.editorId)fail('INSTANCE_CHANGED','Editor binding changed while saving comparison evidence');
       return report;
     }finally{releaseCapture?.();release();}
+  }
+  async analyze(sessionId,input,exec={}){
+    const args=imageAnalyzeSchema.parse(input);
+    if(!isAbsolute(args.imagePath))fail('INVALID_REFERENCE','imagePath must be an absolute local image path');
+    checkAbort(exec.signal);
+    const analysisId=randomUUID(),directory=join(this.root,keyFor(sessionId),analysisId);
+    const release=this.cache.protect([directory,args.imagePath]);
+    try{
+      const outputDir=await this.directory(sessionId,analysisId),sourcePath=join(outputDir,'analysis-source.image');
+      await this.readReference(args.imagePath,sourcePath,exec);
+      const queued=this.comparisonQueue.catch(()=>{}).then(()=>{
+        checkAbort(exec.signal);
+        return analyzeImage({...args,imagePath:sourcePath},{signal:exec.signal});
+      });
+      this.comparisonQueue=queued;
+      const result=await queued;
+      const report={...result,analysisId,source:{...result.source,path:args.imagePath},reportPath:join(outputDir,'analysis.json')};
+      await writeFile(report.reportPath,JSON.stringify(report,null,2),{flag:'wx'});
+      checkAbort(exec.signal);
+      return report;
+    }finally{release();}
   }
   dispose(){
     this.disposed=true;this.unsubscribe();this.bridge.off('request-settled',this.requestSettled);

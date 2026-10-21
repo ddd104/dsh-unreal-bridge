@@ -4,24 +4,28 @@ import {randomUUID} from 'node:crypto';
 import {registerExecutionGuard} from '../src/execution-guard.mjs';
 
 function fixture(t,config={},options={}){
-  const hooks=new Map(),cancellations=[];
+  const hooks=new Map(),hookSettings=new Map(),cancellations=[];
   const session={id:'conversation'};
   const agent={session,cancel:(...args)=>cancellations.push(args)};
-  const ctx=options.noHooks?{}:{on(name,callback){hooks.set(name,callback);return ()=>hooks.delete(name);}};
+  const ctx=options.noHooks?{}:{on(name,callback,settings){hooks.set(name,callback);hookSettings.set(name,settings);return ()=>hooks.delete(name);}};
   if(options.projection)ctx.sessionProjections={stateOf:()=>options.projection};
   const guard=registerExecutionGuard(ctx,config);t.after(()=>guard.dispose());
   const event=(type,data,seq)=>hooks.get('session/event')?.(session,{type,data,seq});
   const exec=(name='unreal_state',arguments_={},extra={})=>({agent,name,arguments:arguments_,callId:randomUUID(),token:Symbol('execution'),signal:new AbortController().signal,...extra});
   const pre=call=>hooks.get('tools/pre-execute')(call,async()=>({kind:'allow'}));
   const post=(call,result)=>hooks.get('tools/post-execute')(call,result,async()=>({kind:'accept'}));
+  const execute=(call,body)=>hooks.get('tools/execute')(call,body);
+  const question=(body,extra={})=>hooks.get('user-questions/request')({agent,questions:[{id:'selection',question:'Select the Actor'}],signal:new AbortController().signal,...extra},body);
   const step=step=>hooks.get('agent/pre-step')({agent,turn:1,step,signal:new AbortController().signal},async()=>({kind:'enter',messages:[]}));
   const assemble=async(names=['unreal_state','unreal_request_status','unreal_apply','read','run_code'])=>{
     const assembly={tools:names.map(name=>({name,description:name,parameters:{type:'object'}})),sections:[],contexts:[],variables:{}};
     return hooks.get('system-prompt/assemble')(assembly,{agent,scope:agent},async()=>assembly);
   };
   event('turn/start',{turn:1},1);
-  return {ctx,hooks,session,agent,guard,event,exec,pre,post,step,assemble,cancellations};
+  return {ctx,hooks,hookSettings,session,agent,guard,event,exec,pre,post,execute,question,step,assemble,cancellations};
 }
+
+const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 
 test('the first Unreal call activates the guard and all later root tools share its budget',async t=>{
   const f=fixture(t,{guardMaxToolCalls:2});
@@ -56,7 +60,7 @@ test('default calls continue past the old limits and stop at 300 with a model-vi
   assert.equal(denied.kind,'deny');assert.equal(denied.info.code,'EXECUTION_BUDGET_EXHAUSTED');
   const state=f.guard.status(f.session.id);
   assert.equal(state.toolCalls,300);assert.equal(state.remaining.toolCalls,0);assert.equal(state.phase,'summary');
-  assert.deepEqual(state.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardTimeoutMs:1800000,guardMaxRepairAttempts:3,guardMaxRepeatedErrors:2});
+  assert.deepEqual(state.limits,{guardMaxToolCalls:300,guardMaxSteps:200,guardMaxErrors:50,guardMaxMalformedRetries:2,guardTimeoutMs:1800000,guardMaxRepairAttempts:3,guardMaxRepeatedErrors:2});
   assert.equal(f.cancellations.length,0);
 });
 
@@ -447,6 +451,136 @@ test('the active-turn timeout really cancels its agent',t=>{
   assert.match(f.cancellations[0][0].reason,/超过/);
 });
 
+test('a validated human question excludes only waiting time and resumes the remaining budget',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:100}),answer=deferred();
+  await f.pre(f.exec());t.mock.timers.tick(30);
+  const ask=f.exec('ask_user_question');await f.pre(ask);
+  const pending=f.execute(ask,()=>f.question(()=>answer.promise));
+  assert.equal(f.hookSettings.get('user-questions/request').prepend,true);
+  t.mock.timers.tick(2000);
+  const waiting=f.guard.status(f.session.id);
+  assert.equal(waiting.waitingForUser,true);assert.equal(waiting.remaining.timeMs,70);
+  assert.equal(waiting.elapsedMs,30);assert.equal(waiting.pausedMs,2000);
+  assert.equal(waiting.calls,2);assert.equal(f.cancellations.length,0);
+  answer.resolve({answers:[]});await pending;
+  const resumed=f.guard.status(f.session.id);
+  assert.equal(resumed.waitingForUser,false);assert.equal(resumed.deadlineAt,3100);
+  t.mock.timers.tick(69);assert.equal(f.cancellations.length,0);
+  t.mock.timers.tick(1);assert.equal(f.cancellations.length,1);
+});
+
+test('a tool named ask_user_question cannot pause the budget before the validated seam',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:50}),blocked=deferred();await f.pre(f.exec());
+  const ask=f.exec('ask_user_question');await f.pre(ask);
+  const pending=f.execute(ask,()=>blocked.promise);
+  t.mock.timers.tick(50);
+  assert.equal(f.cancellations.length,1);assert.equal(f.guard.status(f.session.id).pausedMs,0);
+  blocked.resolve();await pending;
+});
+
+test('parallel tool work stays charged while another call waits for the user',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:100}),work=deferred(),answer=deferred();
+  const ordinary=f.exec();await f.pre(ordinary);
+  const working=f.execute(ordinary,()=>work.promise);
+  const ask=f.exec('ask_user_question');await f.pre(ask);
+  const asking=f.execute(ask,()=>f.question(()=>answer.promise));
+  assert.equal(f.guard.status(f.session.id).waitingForUser,false);
+  t.mock.timers.tick(40);work.resolve();await working;
+  assert.equal(f.guard.status(f.session.id).waitingForUser,true);
+  t.mock.timers.tick(1000);assert.equal(f.cancellations.length,0);
+  answer.resolve({answers:[]});await asking;
+  assert.equal(f.guard.status(f.session.id).remaining.timeMs,60);
+  t.mock.timers.tick(60);assert.equal(f.cancellations.length,1);
+});
+
+test('starting independent tool work resumes the deadline while the question is still pending',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:50}),answer=deferred(),work=deferred();await f.pre(f.exec());
+  const ask=f.exec('ask_user_question');await f.pre(ask);
+  const asking=f.execute(ask,()=>f.question(()=>answer.promise));
+  t.mock.timers.tick(1000);
+  const ordinary=f.exec('read');assert.equal((await f.pre(ordinary)).kind,'allow');
+  const working=f.execute(ordinary,()=>work.promise);
+  assert.equal(f.guard.status(f.session.id).waitingForUser,false);
+  t.mock.timers.tick(50);assert.equal(f.cancellations.length,1);
+  work.resolve();answer.resolve({answers:[]});await Promise.all([working,asking]);
+});
+
+test('nested run_code waits pause its ancestors but still charge parallel nested tools',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:100}),answer=deferred(),work=deferred();await f.pre(f.exec());
+  const parent=f.exec('run_code');await f.pre(parent);
+  const pending=f.execute(parent,async()=>{
+    const ask=f.exec('ask_user_question',{},{parent:parent.token,rootCallId:parent.callId});await f.pre(ask);
+    const asking=f.execute(ask,()=>f.question(()=>answer.promise));
+    assert.equal(f.guard.status(f.session.id).waitingForUser,true);
+    const ordinary=f.exec('read',{},{parent:parent.token,rootCallId:parent.callId});await f.pre(ordinary);
+    const working=f.execute(ordinary,()=>work.promise);
+    assert.equal(f.guard.status(f.session.id).waitingForUser,false);
+    t.mock.timers.tick(25);work.resolve();await working;
+    assert.equal(f.guard.status(f.session.id).waitingForUser,true);
+    t.mock.timers.tick(1000);answer.resolve({answers:[]});await asking;
+  });
+  await pending;
+  assert.equal(f.guard.status(f.session.id).remaining.timeMs,75);
+  assert.equal(f.guard.status(f.session.id).calls,2);
+  assert.equal(f.cancellations.length,0);
+});
+
+test('overlapping questions share one pause and resume only when the last question settles',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:100}),first=deferred(),second=deferred();await f.pre(f.exec());
+  const one=f.exec('ask_user_question'),two=f.exec('ask_user_question');await f.pre(one);await f.pre(two);
+  const askingOne=f.execute(one,()=>f.question(()=>first.promise));
+  const askingTwo=f.execute(two,()=>f.question(()=>second.promise));
+  t.mock.timers.tick(1000);first.resolve({answers:[]});await askingOne;
+  assert.equal(f.guard.status(f.session.id).waitingForUser,true);
+  t.mock.timers.tick(1000);second.resolve({answers:[]});await askingTwo;
+  const state=f.guard.status(f.session.id);
+  assert.equal(state.pausedMs,2000);assert.equal(state.remaining.timeMs,100);
+  t.mock.timers.tick(100);assert.equal(f.cancellations.length,1);
+});
+
+test('question rejection and cancellation restore the original remaining budget',async t=>{
+  for(const outcome of ['reject','abort']){
+    t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+    const f=fixture(t,{guardTimeoutMs:100}),answer=deferred(),controller=new AbortController();await f.pre(f.exec());
+    t.mock.timers.tick(20);
+    const ask=f.exec('ask_user_question');await f.pre(ask);
+    const pending=f.execute(ask,()=>f.question(()=>answer.promise,{signal:controller.signal}));
+    const rejected=assert.rejects(pending,/cancelled/);
+    t.mock.timers.tick(1000);
+    if(outcome==='abort'){
+      controller.abort(new Error('cancelled'));
+      assert.equal(f.guard.status(f.session.id).waitingForUser,false,'abort must restore even before an answerer settles');
+    }
+    answer.reject(new Error('cancelled'));await rejected;
+    const resumed=f.guard.status(f.session.id);
+    assert.equal(resumed.remaining.timeMs,80);assert.equal(resumed.elapsedMs,20);
+    t.mock.timers.tick(80);assert.equal(f.cancellations.length,1);
+    t.mock.timers.reset();
+  }
+});
+
+test('late question cleanup cannot resume a completed or replacement turn',async t=>{
+  t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+  const f=fixture(t,{guardTimeoutMs:100}),answer=deferred();await f.pre(f.exec());
+  t.mock.timers.tick(20);
+  const ask=f.exec('ask_user_question');await f.pre(ask);
+  const pending=f.execute(ask,()=>f.question(()=>answer.promise));
+  t.mock.timers.tick(1000);f.event('turn/end',{turn:1},3);
+  const ended=f.guard.status(f.session.id);assert.equal(ended.elapsedMs,20);assert.equal(ended.remaining.timeMs,80);
+  t.mock.timers.tick(1000);assert.deepEqual(f.guard.status(f.session.id),ended);
+  f.event('turn/start',{turn:2},4);await f.pre(f.exec());
+  answer.resolve({answers:[]});await pending;
+  const current=f.guard.status(f.session.id);
+  assert.equal(current.turn,2);assert.equal(current.pausedMs,0);assert.equal(current.waitingForUser,false);
+  t.mock.timers.tick(100);assert.equal(f.cancellations.length,1);
+});
+
 test('turn end, a new turn and disposal clear old timeout callbacks',t=>{
   t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
   const f=fixture(t,{guardTimeoutMs:50});f.guard.before(f.exec());
@@ -519,4 +653,6 @@ test('sessions have independent budgets and pre-Unreal failures do not activate 
 
 test('invalid guard limits fail clearly',()=>{
   for(const value of [0,-1,1.5,Infinity,'40'])assert.throws(()=>registerExecutionGuard({}, {guardMaxToolCalls:value}),/positive safe integer/);
+  for(const value of [-1,1.5,Infinity,'2'])assert.throws(()=>registerExecutionGuard({}, {guardMaxMalformedRetries:value}),/nonnegative safe integer/);
+  const guard=registerExecutionGuard({}, {guardMaxMalformedRetries:0});guard.dispose();
 });

@@ -1,6 +1,7 @@
 #include "Modules/ModuleManager.h"
 #include "DSHBlueprintOps.h"
 #include "DSHDataTableOps.h"
+#include "DSHMaterialOps.h"
 #include "DSHLevelBlueprintLookup.h"
 #include "DSHAssetPresentation.h"
 #include "DSHMcpEditAdapter.h"
@@ -31,6 +32,11 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
+#include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
+#include "EdGraphSchema_K2.h"
+#include "UObject/Package.h"
+#include "UObject/StrongObjectPtr.h"
 #endif
 
 DEFINE_LOG_CATEGORY_STATIC(LogDSHBridge,Log,All);
@@ -40,6 +46,14 @@ namespace
 FString Encode(const TSharedPtr<FJsonObject>& Object) { FString Text;FJsonSerializer::Serialize(Object.ToSharedRef(),TJsonWriterFactory<>::Create(&Text));return Text; }
 FString Field(const TSharedPtr<FJsonObject>& O,const TCHAR* K){FString V;if(O)O->TryGetStringField(K,V);return V;}
 TSharedPtr<FJsonObject> Decode(const FString& Text){TSharedPtr<FJsonObject> O;FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text),O);return O;}
+FString RequestHash(const FString& Method,const TSharedPtr<FJsonObject>& Params)
+{
+    auto SemanticParams=MakeShared<FJsonObject>();SemanticParams->Values=Params->Values;
+    // Internal identity evidence may be refreshed for an identical request UUID.
+    if(Method==TEXT("mcp_call_tool"))SemanticParams->RemoveField(TEXT("operationToken"));
+    const FTCHARToUTF8 Bytes(*(Method+Encode(SemanticParams)));
+    return FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
+}
 
 // Keep this exact allowlist aligned with the audited queries in mcp-contract.mjs.
 // Native tool names and caller-provided annotations do not establish read safety.
@@ -53,10 +67,25 @@ bool IsAuditedMcpRead(const TSharedPtr<FJsonObject>& Params)
         Name=Field(*Arguments,TEXT("toolset_name"))+TEXT(".")+Field(*Arguments,TEXT("tool_name"));
     }
     static const TSet<FString> Reads={
+        TEXT("editor_toolset.toolsets.blueprint.BlueprintTools.get_default_object"),
+        TEXT("editor_toolset.toolsets.blueprint.BlueprintTools.list_graphs"),
+        TEXT("editor_toolset.toolsets.blueprint.BlueprintTools.find_nodes"),
+        TEXT("editor_toolset.toolsets.blueprint.BlueprintTools.get_node_infos"),
+        TEXT("editor_toolset.toolsets.object.ObjectTools.get_class"),
+        TEXT("editor_toolset.toolsets.object.ObjectTools.get_properties"),
+        TEXT("editor_toolset.toolsets.object.ObjectTools.list_properties"),
         TEXT("editor_toolset.toolsets.data_table.DataTableTools.get_schema"),
         TEXT("editor_toolset.toolsets.data_table.DataTableTools.list_rows"),
         TEXT("editor_toolset.toolsets.data_table.DataTableTools.get_rows"),
-        TEXT("editor_toolset.toolsets.data_table.DataTableTools.search_row_structs")
+        TEXT("editor_toolset.toolsets.data_table.DataTableTools.search_row_structs"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.list_expression_classes"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.get_expressions"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.list_parameter_groups"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.get_expression_input_names"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.get_expression_output_names"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.get_expression_inputs"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.get_property_input"),
+        TEXT("editor_toolset.toolsets.material.MaterialTools.get_referencing_materials")
     };
     return Reads.Contains(Name);
 }
@@ -148,6 +177,7 @@ public:
     void Stop()
     {
         ++Generation;
+        OperationContexts.Reset();
         for (const auto& Pending : PendingKnowledge) FProjectKnowledgeService::Cancel(Pending.Value);
         PendingKnowledge.Reset();
         FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
@@ -179,9 +209,11 @@ private:
     TSet<TWeakObjectPtr<UBlueprint>> Dirty;
     FDSHBlueprintOps Operations;
     FDSHAssetPresentation Presentation;
+    FDSHMcpOperationContexts OperationContexts;
 #if WITH_DEV_AUTOMATION_TESTS
     friend class FDSHWriteCoordinationTest;
     friend class FDSHBoundedFailureTest;
+    friend class FDSHMcpOperationAdmissionTest;
     TFunction<void(const TSharedPtr<FJsonObject>&)> ObserveTestResponse;
 #endif
     void Send(const TSharedPtr<FJsonObject>& O)
@@ -204,6 +236,7 @@ private:
         const FString URL=Field(Config,TEXT("url"));const FString Token=Field(Config,TEXT("token"));
         if(!URL.StartsWith(TEXT("ws://127.0.0.1:"))||!URL.EndsWith(TEXT("/editor"))||Token.Len()!=64)return;
         const uint64 CurrentGeneration=++Generation;
+        OperationContexts.Reset();
         if(Socket){Socket->OnConnected().Clear();Socket->OnConnectionError().Clear();Socket->OnClosed().Clear();Socket->OnMessage().Clear();Socket->Close();Socket.Reset();}
         bConnecting=true;bAuthenticated=false;TMap<FString,FString> Headers;Headers.Add(TEXT("Authorization"),TEXT("Bearer ")+Token);
         Socket=FWebSocketsModule::Get().CreateWebSocket(URL,TArray<FString>(),Headers);
@@ -217,7 +250,7 @@ private:
     void Hello()
     {
         bConnecting=false;Sequence=0;auto O=MakeShared<FJsonObject>();O->SetStringField(TEXT("type"),TEXT("hello"));O->SetNumberField(TEXT("protocol"),1);O->SetStringField(TEXT("editorId"),EditorId);O->SetStringField(TEXT("project"),FApp::GetProjectName());O->SetStringField(TEXT("projectPath"),FPaths::ConvertRelativePathToFull(FPaths::GetProjectFilePath()));O->SetStringField(TEXT("engineVersion"),FEngineVersion::Current().ToString());O->SetNumberField(TEXT("pid"),FPlatformProcess::GetCurrentProcessId());
-        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
+        TArray<TSharedPtr<FJsonValue>> Caps;for(const TCHAR* Name:{TEXT("selection"),TEXT("level_selection"),TEXT("blueprint_component_selection"),TEXT("runtime_inspection"),TEXT("read_blueprint"),TEXT("preview_patch"),TEXT("apply_patch"),TEXT("create_blueprint"),TEXT("undo"),TEXT("save"),TEXT("request_status"),TEXT("mcp_tools"),TEXT("mcp_target_validation"),TEXT("mcp_operation_context"),TEXT("safe_asset_presentation"),TEXT("project_knowledge"),TEXT("focus_asset"),TEXT("custom_event_patch"),TEXT("visual_capture"),TEXT("data_table_copy_property"),TEXT("automatic_graph_layout"),TEXT("level_blueprint_lookup"),TEXT("material_graph_patch")})Caps.Add(MakeShared<FJsonValueString>(Name));O->SetArrayField(TEXT("capabilities"),Caps);Send(O);
     }
     TSharedPtr<FJsonObject> Error(const FString& Id,const FString& Code,const FString& Message,const TSharedPtr<FJsonObject>& Details=nullptr)
     {
@@ -288,12 +321,26 @@ private:
         // read callbacks. Another method must not reuse one and release its writer.
         if(PendingMcp.Contains(Id)||PendingKnowledge.Contains(Id)||PendingWriteRequestId==Id)
         {
-            const FTCHARToUTF8 Bytes(*(Method+Encode(Params)));const FString Hash=FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
+            const FString Hash=RequestHash(Method,Params);
             const FString* Previous=RequestHashes.Find(Id);
             Send(Previous&&*Previous!=Hash
                 ?Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters"))
                 :Error(Id,TEXT("IN_PROGRESS"),TEXT("This request is still running; query request status")));
             return;
+        }
+        if(Method==TEXT("mcp_operation_context"))
+        {
+            const TSharedPtr<FJsonObject>* Arguments=nullptr;
+            FString ContextCode,ContextMessage;TSharedPtr<FJsonObject> ContextDetails;
+            if(!Params->TryGetObjectField(TEXT("arguments"),Arguments)||!Arguments||!Arguments->IsValid())
+            {
+                auto Details=MakeShared<FJsonObject>();Details->SetStringField(TEXT("execution"),TEXT("not_started"));Details->SetBoolField(TEXT("retryable"),true);
+                Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("Operation preflight requires the exact MCP name and arguments object"),Details));return;
+            }
+            const auto Result=OperationContexts.Prepare(Field(Params,TEXT("name")),*Arguments,ContextDetails,ContextCode,ContextMessage);
+            auto Response=Result?MakeShared<FJsonObject>():Error(Id,ContextCode,ContextMessage,ContextDetails);
+            if(Result){Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
+            Send(Response);return;
         }
         if(Method==TEXT("resolve_level_blueprint"))
         {
@@ -346,11 +393,13 @@ private:
             Send(Error(Id,TEXT("INVALID_REQUEST"),TEXT("Unknown knowledge tool or invalid arguments")));return;
         }
         const bool bKnowledgeWrite=FProjectKnowledgeService::IsWriteTool(KnowledgeTool);
-        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||Method==TEXT("data_table_copy_property")||bKnowledgeWrite;
+        bool bMaterialDryRun=true;
+        if(Method==TEXT("material_patch"))Params->TryGetBoolField(TEXT("dryRun"),bMaterialDryRun);
+        const bool bWrite=Method==TEXT("apply_patch")||Method==TEXT("create_blueprint")||Method==TEXT("undo")||Method==TEXT("save")||Method==TEXT("mcp_call_tool")||Method==TEXT("data_table_copy_property")||(Method==TEXT("material_patch")&&!bMaterialDryRun)||bKnowledgeWrite;
         const bool bMutation=bWrite&&(Method!=TEXT("mcp_call_tool")||!IsAuditedMcpRead(Params));
         if(bWrite)
         {
-            const FTCHARToUTF8 Bytes(*(Method+Encode(Params)));const FString Hash=FMD5::HashBytes(reinterpret_cast<const uint8*>(Bytes.Get()),Bytes.Length());
+            const FString Hash=RequestHash(Method,Params);
             if(const FString* Previous=RequestHashes.Find(Id)){if(*Previous!=Hash)Send(Error(Id,TEXT("IDEMPOTENCY_MISMATCH"),TEXT("Request ID has different parameters")));else if(Results.Contains(Id))Send(Results[Id]);else if(PendingMcp.Contains(Id)||PendingKnowledge.Contains(Id))Send(Error(Id,TEXT("IN_PROGRESS"),TEXT("This tool call is still running; query request status")));else Send(Error(Id,TEXT("RESULT_EXPIRED"),TEXT("This write already ran; cached result expired, do not repeat")));return;}
             if(bMutation&&!PendingWriteRequestId.IsEmpty())
             {
@@ -368,12 +417,16 @@ private:
                 // Inspect current native tool metadata and real UObject types on
                 // the game thread before snapshots, tool execution or journaling.
                 // Rejected requests may be corrected without a new request UUID.
-                if(!FDSHMcpTargetValidation::Validate(Field(Params,TEXT("name")),*ToolArguments,ValidationDetails,ValidationCode,ValidationMessage))
+                const bool bValid=Params->HasField(TEXT("operationToken"))
+                    ?OperationContexts.Verify(Field(Params,TEXT("operationToken")),Field(Params,TEXT("name")),*ToolArguments,bMutation,ValidationDetails,ValidationCode,ValidationMessage)
+                    :FDSHMcpTargetValidation::Validate(Field(Params,TEXT("name")),*ToolArguments,ValidationDetails,ValidationCode,ValidationMessage);
+                if(!bValid)
                 {
                     Send(Error(Id,ValidationCode,ValidationMessage,ValidationDetails));return;
                 }
             }
             if(RequestHashes.Num()>=10000){Send(Error(Id,TEXT("REQUEST_LIMIT"),TEXT("Write request journal is full; restart the editor after reconciling pending requests")));return;}
+            if(Method==TEXT("mcp_call_tool")&&Params->HasField(TEXT("operationToken")))OperationContexts.Consume(Field(Params,TEXT("operationToken")));
             RequestHashes.Add(Id,Hash);
             if(bMutation)PendingWriteRequestId=Id;
         }
@@ -432,7 +485,9 @@ private:
             return;
         }
         FString Code,MessageText;FDSHAssetViewHint ViewHint;TSharedPtr<FJsonObject> ErrorDetails;
-        auto Result=Method==TEXT("data_table_copy_property")?FDSHDataTableOps::CopyProperty(Params,Code,MessageText,ErrorDetails):Operations.Execute(Method,Params,Code,MessageText,&ViewHint,&ErrorDetails);TSharedPtr<FJsonObject> Response;
+        auto Result=Method==TEXT("data_table_copy_property")?FDSHDataTableOps::CopyProperty(Params,Code,MessageText,ErrorDetails)
+            :Method==TEXT("material_read")||Method==TEXT("material_patch")?FDSHMaterialOps::Execute(Method,Params,Code,MessageText,ErrorDetails,&ViewHint)
+            :Operations.Execute(Method,Params,Code,MessageText,&ViewHint,&ErrorDetails);TSharedPtr<FJsonObject> Response;
         if(Result){Response=MakeShared<FJsonObject>();Response->SetStringField(TEXT("type"),TEXT("response"));Response->SetStringField(TEXT("id"),Id);Response->SetBoolField(TEXT("ok"),true);Response->SetObjectField(TEXT("result"),Result);}
         else Response=Error(Id,Code,MessageText,ErrorDetails);
         Response=BoundResponse(Response,TEXT("Read a summary or filter by graph and nodeIds; response exceeds 2 MiB"));
@@ -480,6 +535,77 @@ private:
 };
 
 #if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHMcpOperationAdmissionTest,"DSH.Bridge.McpOperationContext.DispatchAdmission",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
+bool FDSHMcpOperationAdmissionTest::RunTest(const FString&)
+{
+    const auto Connection=MakeShared<FDSHConnection>();
+    TArray<TSharedPtr<FJsonObject>> Responses;
+    Connection->ObserveTestResponse=[&Responses](const TSharedPtr<FJsonObject>& Response){Responses.Add(Response);};
+    auto Dispatch=[&Connection](const FString& Id,const FString& Method,const TSharedPtr<FJsonObject>& Params)
+    {
+        auto Envelope=MakeShared<FJsonObject>();Envelope->SetStringField(TEXT("id"),Id);Envelope->SetNumberField(TEXT("protocol"),1);Envelope->SetStringField(TEXT("method"),Method);Envelope->SetObjectField(TEXT("params"),Params);Connection->Request(Envelope);
+    };
+    auto ErrorCode=[&Responses](){return Field(Responses.Last()->GetObjectField(TEXT("error")),TEXT("code"));};
+    TStrongObjectPtr<UBlueprint> Blueprint(NewObject<UBlueprint>(GetTransientPackage(),NAME_None,RF_Transient));
+    UEdGraph* Graph=NewObject<UEdGraph>(Blueprint.Get(),TEXT("OperationGraph"),RF_Transient);
+    Graph->Schema=UEdGraphSchema_K2::StaticClass();Blueprint->UbergraphPages.Add(Graph);
+    UEdGraphNode* Node=NewObject<UEdGraphNode>(Graph,TEXT("OperationNode"),RF_Transient);Graph->AddNode(Node,false,false);
+    Node->NodePosX=87;
+    auto Params=MakeShared<FJsonObject>(),Arguments=MakeShared<FJsonObject>(),Reference=MakeShared<FJsonObject>();
+    Reference->SetStringField(TEXT("refPath"),Node->GetPathName());Arguments->SetObjectField(TEXT("instance"),Reference);Arguments->SetStringField(TEXT("values"),TEXT("{\"NodePosX\":123}"));
+    auto DispatchArguments=MakeShared<FJsonObject>();DispatchArguments->SetStringField(TEXT("toolset_name"),TEXT("editor_toolset.toolsets.object.ObjectTools"));DispatchArguments->SetStringField(TEXT("tool_name"),TEXT("set_properties"));DispatchArguments->SetObjectField(TEXT("arguments"),Arguments);
+    Params->SetStringField(TEXT("name"),TEXT("call_tool"));Params->SetObjectField(TEXT("arguments"),DispatchArguments);
+    Dispatch(TEXT("context-read"),TEXT("mcp_operation_context"),Params);
+    if(!TestTrue(TEXT("Internal context request succeeds"),Responses.Last()->GetBoolField(TEXT("ok"))))return false;
+    const FString Token=Responses.Last()->GetObjectField(TEXT("result"))->GetStringField(TEXT("token"));
+    TestEqual(TEXT("Preflight never executed the native write"),Node->NodePosX,87);
+    TestTrue(TEXT("Preflight does not consume a write UUID"),Connection->RequestHashes.IsEmpty());
+    TestTrue(TEXT("Preflight does not enter MCP dispatch"),Connection->PendingMcp.IsEmpty());
+    TestTrue(TEXT("Preflight does not take the write slot"),Connection->PendingWriteRequestId.IsEmpty());
+    Params->SetStringField(TEXT("operationToken"),TEXT("unknown-token"));
+    Dispatch(TEXT("write-uuid"),TEXT("mcp_call_tool"),Params);
+    TestEqual(TEXT("Unknown token fails before dispatch"),ErrorCode(),FString(TEXT("MCP_OPERATION_TOKEN_INVALID")));
+    TestFalse(TEXT("Unknown token does not consume UUID"),Connection->RequestHashes.Contains(TEXT("write-uuid")));
+    TestEqual(TEXT("Unknown token proves execution did not start"),Field(Responses.Last()->GetObjectField(TEXT("error"))->GetObjectField(TEXT("details")),TEXT("execution")),FString(TEXT("not_started")));
+    Params->SetStringField(TEXT("operationToken"),Token);
+    Arguments->SetStringField(TEXT("values"),TEXT("{\"NodePosX\":456}"));
+    Dispatch(TEXT("write-uuid"),TEXT("mcp_call_tool"),Params);
+    TestEqual(TEXT("Changed arguments fail before dispatch"),ErrorCode(),FString(TEXT("MCP_OPERATION_CALL_MISMATCH")));
+    TestFalse(TEXT("Changed arguments do not consume UUID"),Connection->RequestHashes.Contains(TEXT("write-uuid")));
+    Arguments->SetStringField(TEXT("values"),TEXT("{\"NodePosX\":123}"));
+    Connection->PendingWriteRequestId=TEXT("another-write");
+    Dispatch(TEXT("write-uuid"),TEXT("mcp_call_tool"),Params);
+    TestEqual(TEXT("A token never bypasses mutation coordination"),ErrorCode(),FString(TEXT("EDITOR_BUSY")));
+    FString Code,Message;TSharedPtr<FJsonObject> Details;
+    TestTrue(TEXT("Busy rejection leaves evidence available"),Connection->OperationContexts.Verify(Token,Field(Params,TEXT("name")),DispatchArguments,true,Details,Code,Message));
+    Connection->PendingWriteRequestId.Reset();
+    const FString OldPath=Node->GetPathName();
+    Node->Rename(TEXT("RetiredOperationNode"),nullptr,REN_DontCreateRedirectors|REN_NonTransactional|REN_DoNotDirty);Graph->Nodes.Remove(Node);Node->MarkAsGarbage();
+    UEdGraphNode* Replacement=NewObject<UEdGraphNode>(Graph,TEXT("OperationNode"),RF_Transient);Graph->AddNode(Replacement,false,false);Replacement->NodePosX=99;
+    TestEqual(TEXT("Native replacement uses the old exact path"),Replacement->GetPathName(),OldPath);
+    Dispatch(TEXT("write-uuid"),TEXT("mcp_call_tool"),Params);
+    TestEqual(TEXT("Weak identity mismatch is rejected"),ErrorCode(),FString(TEXT("MCP_OPERATION_TARGET_CHANGED")));
+    TestFalse(TEXT("Stale identity does not consume UUID"),Connection->RequestHashes.Contains(TEXT("write-uuid")));
+    TestTrue(TEXT("Rejected writes never enter MCP dispatch"),Connection->PendingMcp.IsEmpty());
+    TestEqual(TEXT("Replacement is untouched"),Replacement->NodePosX,99);
+
+    // Journal replay precedes token validation, including refreshed/expired
+    // evidence. Neither cached nor pending UUIDs may execute a second time.
+    const FString ReplayId=TEXT("completed-operation");
+    auto Cached=MakeShared<FJsonObject>();Cached->SetStringField(TEXT("type"),TEXT("response"));Cached->SetStringField(TEXT("id"),ReplayId);Cached->SetBoolField(TEXT("ok"),true);Cached->SetObjectField(TEXT("result"),MakeShared<FJsonObject>());
+    Connection->RequestHashes.Add(ReplayId,RequestHash(TEXT("mcp_call_tool"),Params));Connection->Results.Add(ReplayId,Cached);
+    Params->SetStringField(TEXT("operationToken"),TEXT("refreshed-token"));
+    Dispatch(ReplayId,TEXT("mcp_call_tool"),Params);
+    TestTrue(TEXT("Completed UUID returns its cached response with a new token"),Responses.Last()==Cached);
+    Connection->RequestHashes.Add(TEXT("pending-operation"),RequestHash(TEXT("mcp_call_tool"),Params));Connection->PendingMcp.Add(TEXT("pending-operation"));
+    Params->SetStringField(TEXT("operationToken"),TEXT("another-refreshed-token"));
+    Dispatch(TEXT("pending-operation"),TEXT("mcp_call_tool"),Params);
+    TestEqual(TEXT("Pending replay excludes the wire token from its identity"),ErrorCode(),FString(TEXT("IN_PROGRESS")));
+    TestEqual(TEXT("Replays never touch the replacement"),Replacement->NodePosX,99);
+    Connection->ObserveTestResponse=nullptr;
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FDSHWriteCoordinationTest,"DSH.Bridge.WriteCoordination.AsyncAdmission",EAutomationTestFlags::EditorContext|EAutomationTestFlags::EngineFilter)
 bool FDSHWriteCoordinationTest::RunTest(const FString&)
 {
@@ -503,6 +629,20 @@ bool FDSHWriteCoordinationTest::RunTest(const FString&)
     {
         TestTrue(TEXT("Audited direct query remains read-only"),IsAuditedMcpRead(ToolParams(Tool,false)));
         TestTrue(TEXT("Audited dispatcher query remains read-only"),IsAuditedMcpRead(ToolParams(Tool,true)));
+    }
+    for(const TCHAR* Tool:{TEXT("list_expression_classes"),TEXT("get_expressions"),TEXT("list_parameter_groups"),
+        TEXT("get_expression_input_names"),TEXT("get_expression_output_names"),TEXT("get_expression_inputs"),
+        TEXT("get_property_input"),TEXT("get_referencing_materials")})
+    {
+        auto Params=MakeShared<FJsonObject>(),Arguments=MakeShared<FJsonObject>();
+        const FString Toolset=TEXT("editor_toolset.toolsets.material.MaterialTools");
+        Params->SetStringField(TEXT("name"),Toolset+TEXT(".")+Tool);
+        Params->SetObjectField(TEXT("arguments"),Arguments);
+        TestTrue(TEXT("Audited material query remains read-only"),IsAuditedMcpRead(Params));
+        Params->SetStringField(TEXT("name"),TEXT("call_tool"));
+        Arguments->SetStringField(TEXT("toolset_name"),Toolset);Arguments->SetStringField(TEXT("tool_name"),Tool);
+        Arguments->SetObjectField(TEXT("arguments"),MakeShared<FJsonObject>());
+        TestTrue(TEXT("Audited dispatched material query remains read-only"),IsAuditedMcpRead(Params));
     }
     auto UnknownRead=ToolParams(TEXT("get_and_mutate"),true);
     UnknownRead->SetBoolField(TEXT("readOnlyHint"),true);
@@ -645,6 +785,6 @@ class FDSHUnrealBridgeModule final : public IModuleInterface
 {
     TSharedPtr<FDSHConnection> Connection;
     void StartupModule() override { if(!IsRunningCommandlet()||FParse::Param(FCommandLine::Get(),TEXT("DSHBridgeTest"))){FModuleManager::LoadModuleChecked<FWebSocketsModule>(TEXT("WebSockets"));Connection=MakeShared<FDSHConnection>();Connection->Start();} }
-    void ShutdownModule() override {if(Connection){Connection->Stop();Connection.Reset();}}
+    void ShutdownModule() override {if(Connection){Connection->Stop();Connection.Reset();}FDSHAssetPresentation::ShutdownMaterialTransactions();}
 };
 IMPLEMENT_MODULE(FDSHUnrealBridgeModule,DSHUnrealBridge)

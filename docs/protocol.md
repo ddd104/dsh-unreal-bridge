@@ -6,9 +6,15 @@ DSH host 使用 Cordis tools、systemPrompt、Typert remote 服务；客户端�
 
 Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 共用状态投影。`executionSafety` 包含当前轮限制、剩余用量、`phase`、冻结的 `elapsedMs/endedAt` 和 `repairs`；单问题记录含 `target/family/status/repairAttempts/remainingAttempts/repeatedErrors/blockedBy`。`settings.nextTurnPending` 表示保存的预算与当前轮快照不同。`completed` 表示轮次已结束，不代表任务所有目标均已成功。单问题耗尽返回 `REPAIR_BUDGET_EXHAUSTED`、`scope:"problem"` 和 `canContinueIndependentWork:true`，不会耗用新的整轮错误额度或解锁未知写入。
 
+单问题停止同时返回 `recovery:"stop_problem"` 与 `recoveryConstraints`：保留原目标及诊断，禁止通过新请求编号、工具别名、改名、复制或替代重建继续同一失败任务；独立工作限定为用户已经要求的无关工作。首次触达限制的错误、后续拒绝及紧凑安全结果都携带该约束。硬限制仍基于可信资产身份，并不推断不同资产名对应的语义任务。只有真实新用户轮次会重置修复额度。`MATERIAL_EDITOR_CONFLICT` 使用独立的 `resolve_editor_conflict` 恢复提示，保留用户未应用编辑，不自动 Apply、丢弃、关窗或换工具绕过；它不消耗问题修复额度或创建全局写锁，冲突处理后重新读取目标即可继续。已停止的问题和结果未知的写入不再收到“换新 requestId 修正”的矛盾提醒。
+
 全局 Remote `cacheStatus()` 返回占用、策略、忙碌和扫描完整性；`cacheCleanup({mode:"policy"|"all_idle"})` 返回删除量与跳过原因。这两个入口不需要当前对话，也不作为模型工具。清理只管理插件自有视觉证据及轮转审计归档；`all_idle` 需要界面明确确认。普通状态刷新不触发磁盘统计。视觉结果增加 `expiresAt`；截图编号只在当前宿主进程有效，清理或过期后报告 `CAPTURE_EXPIRED`。
 
 项目技能使用 DSH 的 `skills`/`fs` 服务与原生 `FileSystemSkillProvider`，不经 WebSocket。提供方 `unreal-bridge-project` 按查询 `cwd` 向上定位最近的 `.uproject`，仅开放该工程的 `Plugins/DSHUnrealBridge/Skills`，发现与加载均校验工程归属。项目、自定义目录的同名技能先于插件技能（rank 350），插件技能先于用户全局技能。保留原生 YAML 调用控制、资源目录、正文重读和文件监测；UE 离线时也可加载。没有本机文件映射能力的文件系统不参与此提供方。
+
+模型参数 JSON 恢复使用官方 `agent/request-error` waterfall，不改变 DSH 核心或全局 provider 重试配置。仅处理 `MALFORMED_RESPONSE / DeepSeek Messages stream: tool input is invalid JSON`：本轮需已激活 UE 预算且未停止，持久化的 `assistant/attempt` 必须含非法 UE 工具参数，同一步尚无工具派发或正式响应。插件先委托其他恢复处理，无恢复决定时才补充 `user/message`（`source.kind: unreal-model-recovery`）并返回 `{kind:"retry"}`。`guardMaxMalformedRetries` 默认 2、允许 0–10，按本轮持久化提示计数，跨模型步骤共享且插件重载不清零；不修改原始失败参数或绕过工具层校验。
+
+任务计时仅在官方 `user-questions/request` 已验证问题请求、且同一任务的全部活动工具均处于该等待链时暂停。`tools/execute` 的异步调用上下文保留嵌套和并行工具身份；其他工具开始工作即恢复计时，回答、异常和取消均释放等待。`executionSafety.waitingForUser/pausedMs` 显示等待状态与扣除的时间，`elapsedMs/remaining.timeMs` 排除纯等待区间。已结束或替换轮次的迟到释放不会重启计时器。
 
 ## 模型工具
 
@@ -18,6 +24,9 @@ Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 
 | `unreal_bind` | `editorId` 字符串或 null，仅改变当前对话绑定 |
 | `unreal_runtime_snapshot` | 可选 `target:{playSessionId,worldId,objectId}`、`properties`、`maxProperties`、`includeComponents`、`maxComponents`、`collectionOffset`、`collectionLimit`；只读采集指定 PIE Actor/组件的当前状态；省略目标仅适用于单个 PIE 选区 |
 | `unreal_runtime_history` | `{}` 返回当前对话的 `{snapshots:[摘要...]}`；`{snapshotId}` 返回一份完整历史快照，无需编辑器在线 |
+| `unreal_image_analyze` | `imagePath`，可选 `region/samples/alphaThreshold/backgrounds/includeAlphaHistogram`；无需绑定编辑器，读取源 RGBA 并分开统计显式底色合成 |
+| `unreal_material_read` | `assetPath`，可选 `nodeIds/expressionClasses`；读取当前材质图版本、节点、精确引脚及可编辑属性，需 `material_graph_patch` |
+| `unreal_material_patch` | `assetPath/baseRevision/operations/requestId`，可选 `dryRun/layout/cleanupNodeIds`；默认临时副本预览，显式提交后仍不保存 |
 | `unreal_catalog` | 可选 `query`、`limit`，查询函数路径和精确引脚名 |
 | `unreal_knowledge` | `tool`、`arguments`，通过当前对话绑定的 UE 编辑器查询项目状态、资料、图谱候选、源码及分页资产快照 |
 | `unreal_knowledge_record` | `tool`、`arguments`、UUID `requestId`，按配置保存带来源的推断或经验；写入项目缓存并支持请求状态查询 |
@@ -39,6 +48,62 @@ Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 
 
 每个工具需要所属 DSH 对话；其他对话不能使用本对话的 previewId。预览五分钟有效；绑定不同实例、断线或蓝图变化会阻止使用旧预览。原生工具的资产路径使用 `/Game/Folder/BP_Name` 或对应对象路径，不能使用磁盘 `.uasset` 路径。MCP 资产 `refPath` 应使用 `/Game/Folder/BP_Name.BP_Name` 完整对象路径，不能由原生工具接受包路径推断 MCP 引用也接受包路径。
 
+### 源图片分析
+
+`unreal_image_analyze` 从 DSH 文件系统服务读取 `imagePath`，不绕过该服务的访问规则，不需要 UE 在线。宿主输入上限 20 MiB，支持单帧 8-bit PNG/JPEG/WebP，解码尺寸最多 8 Mi 像素、单边 16384。`region:{x,y,width,height}` 与最多 64 个 `samples:{x,y}` 均使用 EXIF 方向校正后的源图片坐标；样本必须位于所选区域内。不会缩放图片。
+
+返回 `source` 编码摘要和 SHA-256、`samples[].rgba/opacity`、`sourceRgb`、`alpha`、`composites`、`method` 和受管 `reportPath`。像素为解码并转为 sRGB 后的非预乘 RGBA，不能与编码文件字节、线性材质输入或最终屏幕颜色混同。`alpha` 包含极值、均值、全透明/部分透明/全不透明数量及最多八种主要取值；`includeAlphaHistogram:true` 才返回完整 256 项计数。完全透明像素中的 RGB 不代表可见颜色。
+
+`alphaThreshold` 默认 0，覆盖率和包围矩形只统计 `alpha > alphaThreshold` 的像素，坐标仍为完整源图坐标；没有符合像素时 `bounds:null`。这不执行形状识别或语义分割。`backgrounds` 是最多四个 `[r,g,b]` 数组，均为 0–255 整数。对应合成统计采用明确的 sRGB 显示空间插值 `C = source * alpha + background * (1-alpha)`，不会覆盖源 RGB/alpha，也不声称是线性光或 UE 渲染。默认不添加任何底色。
+
+### 通用材质图批次
+
+原生请求 `material_read/material_patch` 需要编辑器声明 `material_graph_patch`。接受项目或插件挂载点下现有材质/材质函数的包路径或对象路径，拒绝表达式子对象作为资产目标。材质实例使用已发现的参数 API，不把实例当成表达式图。创建空资产可使用当前 UE 提供的资产创建工具，再读取并提交图批次。
+
+当前支持普通 `UMaterial` 和 `UMaterialFunction`；材质层/混合函数、复合或嵌套图、执行引脚图不在支持范围。Custom 输入数组可保留已有连接后扩展；尚不能安全重建引脚的特殊属性修改（如 Get/SetMaterialAttributes 的动态属性类型数组）明确拒绝。材质函数输入/输出的标识、名称、类型或顺序发生变化，且存在已加载资产调用者时，返回 `MATERIAL_FUNCTION_INTERFACE_IN_USE`，提交前停止；此工具不执行跨资产接口迁移，也不保证未加载调用者的兼容性。
+
+`unreal_material_read` 返回 `assetPath/assetClass/revision/nodes/nodesComplete`。`nodeIds` 最多 256 项；省略表示完整图。`expressionClasses` 最多 32 个精确 `/Script/Module.Class` 路径，用于同次查询表达式类定义。节点携带真实 `objectPath/classPath/ownerPath`，宿主核对请求目标和编辑器绑定后才将这些原生归属证据用于属性修改的修复分类；调用者自报的类或所有者没有这种作用，编辑器重连不复用旧证据。
+
+`unreal_material_patch` 包含 1–256 项 `operations`：
+
+| `op` | 参数 |
+| --- | --- |
+| `add` | `id/expressionClass`，可选 `properties/position`；`id` 是本批临时别名 |
+| `set` | `id/properties`，更新反射可编辑属性 |
+| `connect` | `from:{id,pin}` 与 `to:{id,pin}` |
+| `output` | `from:{id,pin}` 与材质属性枚举名 `property`，例如 `MP_EmissiveColor` |
+| `disconnect` | `to:{id,pin}`，断开表达式输入 |
+| `delete` | `id`，明确删除该节点 |
+| `asset_properties` | `properties`，更新允许的资产属性 |
+
+现有节点 `id` 来自读回结果；引脚可用实际名称或 0–255 的索引。使用反射属性设置参数组、描述和注释节点；不允许通过属性值直接改所有者、GUID 或连接结构。具体节点及属性类型须以原生元数据和返回错误为准，不能由通用 JSON 类型推断任意属性均可写。
+
+属性写入支持布尔、有限数值、精确枚举名、字符串、具有可编辑字段的结构、最多 512 项的按位置数组及已有资产对象引用。Map/Set 可读取并参与完整版本及恢复核验，但暂不支持直接修改。`nodeMap` 只返回本批新增别名与节点 ID 的对应；预览节点属于临时副本，不得把其 ID 当作真实资产中的节点。提交仍使用相同的原始操作及别名，以提交结果或重新读取获得真实 ID。
+
+`dryRun` 默认 `true`，在临时副本上验证整批与编译；原资产保持不变。实际提交重新检查 `baseRevision`，相同操作以 `dryRun:false` 和新的 UUID 提交。`layout` 默认为 `none`；`all` 明确允许整图排版，首版没有局部排版模式。`cleanupNodeIds` 最多 256 项，只清理给定候选中能够确认不再使用的节点，其他未连接节点不在清理范围。
+
+成功要求 `verified:true` 与请求对应的 `dryRun`，并报告编译和 `saved:false`。失败恢复以操作前的内存状态为基准，保留原有未保存改动；恢复核验失败升级为 `ROLLBACK_FAILED` 和编辑器写锁。超时或断线沿用原请求状态查询，不换 UUID 重发真实写入。旧插件或不支持的类型必须明确拒绝，不能借用第三方 MCP 的事务承诺。
+
+实际提交前检查目标材质/函数已打开编辑器的未应用修改；存在修改或无法确认编辑状态时返回 `MATERIAL_EDITOR_CONFLICT`，`execution:not_started`、`rollback:not_needed`、`retryable:false`。仅资产包尚未保存不构成该冲突。检查在临时编译后、实际写入前再次执行。成功且内容变化时，在事务结束后同步目标已打开的编辑副本，再由展示队列在副本内按稳定 GUID 定位和选中修改节点；不会用原资产的表达式指针跳转编辑器画布。同步未能完成会在成功结果的 `warnings` 中明确说明，不能将它解释为资产提交失败后重放。预览、失败、内容不变的提交不刷新副本；延后的聚焦阶段也不重建编辑图。函数内部修改只刷新目标函数图，不重建调用者的编辑副本。
+
+原生材质批次使用独立事务上下文。撤销/重做期间，仅对这一上下文暂时抑制会把编辑副本写回资产的 UndoClient 广播，并恢复原有抑制状态；下一 tick 从撤销/重做后的资产刷新干净的目标编辑器，再补视口失效及全局通知。其他事务不进入该处理。目标窗口如果已有未应用修改则保留副本并提示未同步，不自动 Apply 或丢弃；无关材质窗口也不会因此应用手改。模块卸载时解除事务监听和待处理同步。
+
+版本校验使用资产的完整编辑数据，包含软引用、集合、长数组和资产拥有的子对象；不使用显示结果的截断值生成版本。超过 64 MiB 或深度 32 的核验范围时拒绝，不能把截断状态当作完整证据。读取返回当前 `dirty`；提交返回的 `saved:false` 表示本次没有保存，并不推断磁盘上是否已有该资产。
+
+编译验证需要真实渲染接口，NullRHI 不报告编译通过。材质函数按预览输入分别编译受支持的数值或 MaterialAttributes 输出；这不覆盖所有调用场景或参数组合，结果中会注明。编译失败发生在临时副本时不改原资产。
+
+材质工作流 skill 只把工具实际提供的检查作为证据：编译通过不等于视觉匹配；源 RGBA 正确不等于场景混合正确；静态检查不等于动态验收。保存使用适用的材质资产工具，不使用仅支持蓝图的 `unreal_save`。
+
+### 蓝图修复额度的原生归属
+
+BlueprintTools 与 ObjectTools 调用另需 `mcp_operation_context` 能力，`unreal_state.toolSafety.nativeOperationContext` 显示当前连接是否支持。宿主在参数校验后自动发送内部只读预检，UE 依据真实 Blueprint、图、节点及嵌套 PinID 确认所属蓝图；ObjectTools 的实际目标为 Blueprint 生成类或已有 CDO 时，也使用原生引用链确定归属，普通场景实例不会被归到其类蓝图。此流程不增加模型需要调用的工具。
+
+同一蓝图的节点新增、连线、引脚值、节点属性及原生补丁共享 `blueprint_edit` 修复范围。关卡蓝图保留完整对象路径，不折成 World 路径。其他资产保持独立；多蓝图写入必须拆分。预检返回绑定调用参数和弱对象身份的短期 token，真正执行前再次核验目标，拒绝销毁后同名重建、归属变化或调用参数变化。token 不授予写权限，也不参与请求幂等哈希；原请求结果查询和缓存回放不重派写入或重复消耗修复次数。
+
+预检不替代实际引脚校验、写权限、全局写锁或编译。目标引用必须已经加载；预检不会加载资产、创建 CDO 或根据路径猜测所有者。预检只解析引脚所属节点，实际派发前仍检查引脚方向和索引；因此引脚无效导致的失败也能计入正确的蓝图范围。缺少能力的旧 UE 插件明确拒绝这些调用，需要更新两端；不降级为路径猜测。
+
+已审计的蓝图查询为 `get_default_object/list_graphs/find_nodes/get_node_infos`，对象查询为 `get_class/get_properties/list_properties`，可以在只读模式、单问题停止或写入结果未知时用于诊断。`read_graph_dsl` 和 `get_node_type_pins` 会在真实图中临时增删节点，不属于只读豁免。工具名称前缀或调用者提供的 `readOnlyHint` 不改变这一分类。
+
 ### DataTable 写入与宿主错误恢复
 
 `data_table_copy_property` 能力启用原生字段复制请求。`sourceRow` 与目标行名最长 1024 字符，`propertyName` 为最多 160 字符的精确反射属性名；`targetRows` 省略时选择除源行外所有行，显式数组必须非空、无重复、不含源行，最多 4096 行。预检无效参数不会写入资产。操作在 GameThread 内以单次事务深复制字段，验证源行、目标字段、其他字段和行集合，失败恢复内存快照及原始 dirty 状态。成功返回 `assetPath/sourceRow/propertyName/targetCount/changedRows/unchangedRows/verified/saved/dirtyBefore/dirtyAfter`；`verified:true`、`saved:false`。不触发窗口聚焦。
@@ -57,7 +122,9 @@ Remote `unrealBridge.state(agent)`、`bind(agent, editorId)` 与 `unreal_state` 
 
 `request_status` 可由绑定同编辑器的其他对话查询原请求。只有有效的 `completed` 响应才能更新原所属对话的幂等缓存并解除未知状态；过期状态查询不能释放后来的写入占用。回滚失败（含旧版仅返回 `ROLLBACK_FAILED`）统一升级为编辑器写锁，原请求状态查询恢复出的失败同样处理。原生蓝图回滚结果通过 `details.execution/rollback/retryable/undoApplied/recompiled` 返回，只有撤销、重新编译与原图版本核验全部成功才标记 `rollback:"restored"`。
 
-已审计的 DataTable `get_schema/list_rows/get_rows/search_row_structs` 精确工具名与原生读取不占用写位，可用于回读；四项 MCP 查询在 `allowWrites:false` 下也可执行，但仍须通过参数和原生目标预检。其他工具的名称前缀或 `readOnlyHint` 不构成只读依据。上述四项 MCP 查询派发前与返回时检查编辑器连接和绑定版本。
+已审计的 DataTable `get_schema/list_rows/get_rows/search_row_structs` 和 MaterialTools `get_expression_input_names/get_expression_inputs/get_expression_output_names/get_expressions/get_property_input/get_referencing_materials/list_expression_classes/list_parameter_groups` 精确工具名，以及上节列出的蓝图和对象查询与原生读取不占用写位，可用于回读；这些查询在 `allowWrites:false` 下也可执行，但仍须通过参数和原生目标预检。其他工具的名称前缀或 `readOnlyHint` 不构成只读依据。宿主与原生层维护相同名单，MCP 查询派发前与返回时检查编辑器连接和绑定版本。
+
+除 `unreal_state/unreal_bind` 保留完整状态外，常规失败或预警返回的 `executionSafety` 只包含阶段、剩余额度、必要的停止/警告信息和本次错误的恢复摘要，不重复全部 limits、历史 issues 或长错误文本。原始错误对象及请求编号仍保留；完整安全状态通过 `unreal_state` 与 UI 按需读取。
 
 ### 关卡蓝图定位
 
@@ -83,7 +150,7 @@ UE 同时跟踪最多 1024 个 Actor/组件句柄，达到上限时回收最久�
 
 UE 桥接公开范围、写入分类和 Knowledge 服务后端路由共用 `ProjectKnowledgeTools.inl` 目录；三项 `graph_*` 均转发到 worker。跨语言契约测试核对该目录、实际宿主参数枚举和 worker 准入表。内部 `project_update/inspect_object/find_objects` 不因此开放给对话。
 
-资产增删改查优先走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 拒绝写入和未确认只读的 MCP，保留四项已审计 DataTable 查询。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用蓝图补丁的预览与版本机制。
+没有适用原生操作的资产增删改查走 UE 5.8 的 MCP 工具。先用 `unreal_mcp_toolsets` 找到完整工具集名称，例如 `editor_toolset.toolsets.asset.AssetTools`，再用 `unreal_mcp_describe` 取得实际工具名称与参数，最后调用 `unreal_mcp_call_toolset`。该调用在已绑定的 UE 进程内执行注册工具，不启动另一个 HTTP MCP 服务；`DSHUnrealBridgeMCP` 是 UE 插件内单独的接入模块。MCP 调用默认直接执行，不经过 DSH 逐次批准；`allowWrites: false` 拒绝写入和未确认只读的 MCP，保留上述已审计的 DataTable、材质、蓝图和对象查询。脚本执行型工具被接入模块拒绝。调用继续沿用请求编号去重、审计和结果未知查询机制。工具集内的保存/删除等操作会遵循 UE 工具自身语义，不沿用原生图补丁的预览与版本机制。
 
 `unreal_mcp_describe` 把工具名称拆为 `name`（如 `get_schema`）、`fullName`（如 `editor_toolset.toolsets.data_table.DataTableTools.get_schema`）和 `toolsetName`。`unreal_mcp_call_toolset` 将短名或匹配当前工具集的完整名规范为短名，再构造执行请求，避免重复前缀。每次执行前，宿主从同一绑定编辑器取得目标工具的精确 schema，用 Ajv 检查缺少必填字段、参数类型等问题；预检失败不发送执行请求，返回可修正错误。`unreal_mcp_call` 的 `call_tool` 封装共用此预检；省略或留空 `toolset_name` 时，按 `tool_name` 解析顶层工具，校验该目标工具的内层参数，再直接调用目标，不能只校验宽泛的外层封装。`call_tool` 调用自身被拒绝。桥接不猜参数，也不把 camelCase 自动改成下划线字段；以 schema 为准。
 
