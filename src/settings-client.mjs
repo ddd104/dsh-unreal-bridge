@@ -1,5 +1,5 @@
 import React, {useEffect, useMemo, useRef, useState, useSyncExternalStore} from 'react';
-import {FIELD_SPECS, SETTING_GROUPS, SETTINGS_NAMESPACE, SETTINGS_SLOT_KEY, fieldValueError} from './settings-spec.mjs';
+import {FIELD_SPECS, SETTING_GROUPS, SETTINGS_NAMESPACE, SETTINGS_SLOT_KEY, fieldValueError, parseFieldInput} from './settings-spec.mjs';
 
 const h = React.createElement;
 const color = {
@@ -78,13 +78,11 @@ export function SettingsPage({view='page', form, renderCache:Cache}) {
               : h('span', null, h('input', {
                 id:`unreal-setting-${field.key}`, name:field.key, type:'number',
                 value:Number.isFinite(draft.values[field.key]) ? draft.values[field.key]/field.scale : '',
-                min:field.min/field.scale, max:field.max/field.scale, step:1/field.scale,
+                min:field.min/field.scale, max:field.max/field.scale, step:field.scale === 1 ? 1 : 'any',
                 disabled, 'aria-invalid':!!errors[field.key], 'aria-describedby':`unreal-setting-hint-${field.key}`,
                 style:{width:120, padding:6, border:`1px solid ${color.border}`, borderRadius:5, background:color.surface, color:color.text},
                 onChange:event=>{
-                  const scaled=event.target.value === '' ? NaN : Number(event.target.value)*field.scale;
-                  const rounded=Math.round(scaled);
-                  change(field.key,Math.abs(scaled-rounded)<0.000001?rounded:scaled);
+                  change(field.key,parseFieldInput(field,event.target.value));
                 },
               }), field.unit ? ` ${field.unit}` : ''),
           ),

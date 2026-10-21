@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import Renderer, {act} from 'react-test-renderer';
 import {SettingsPage, SettingsSection, registerSettingsClient} from '../src/settings-client.mjs';
-import {DEFAULTS, SETTINGS_NAMESPACE, SETTINGS_SLOT_KEY} from '../src/settings-spec.mjs';
+import {DEFAULTS, FIELD_SPECS, SETTINGS_NAMESPACE, SETTINGS_SLOT_KEY} from '../src/settings-spec.mjs';
 
 const h = React.createElement;
 const snapshot = (overrides={}) => ({status:'ready', value:{...DEFAULTS,requireApproval:false}, base:{...DEFAULTS,requireApproval:false}, revision:7, writable:true, ...overrides});
@@ -18,6 +18,23 @@ async function mount(t, state=snapshot(), mutate=async()=>true, renderCache) {
   const submit = async() => {await act(async()=>tree.root.findByType('form').props.onSubmit({preventDefault(){}}));};
   return {tree,update,change,submit};
 }
+
+test('time inputs allow decimal human units and save integer milliseconds without fractional native steps', async t => {
+  const calls=[];
+  const ui=await mount(t,snapshot(),async(...args)=>{calls.push(args);return true;});
+  for (const field of FIELD_SPECS.filter(field=>field.type==='number')) {
+    const input=ui.tree.root.findByProps({name:field.key});
+    assert.equal(input.props.step, field.scale===1 ? 1 : 'any', field.key);
+    assert.equal(input.props['aria-invalid'],false,field.key);
+  }
+  const times=FIELD_SPECS.filter(field=>field.scale>1);
+  for (const field of times) {
+    await ui.change(field.key,'1.23456789');
+    assert.equal(ui.tree.root.findByProps({name:field.key}).props['aria-invalid'],false,field.key);
+  }
+  await ui.submit();
+  assert.deepEqual(calls,[[times.map(field=>({op:'set',path:[field.key],value:Math.round(1.23456789*field.scale)})),7]]);
+});
 
 test('settings register both official entries without depending on the editor remote', async t => {
   const entries=[],slotNames=[],namespaces=[];

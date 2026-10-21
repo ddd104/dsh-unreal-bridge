@@ -35,6 +35,7 @@
     }
   },
   "scripts": {
+    "package:dsh": "node scripts/package-dsh.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --test test/*.test.mjs",
     "check": "npm run build && npm test"

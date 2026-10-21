@@ -1,7 +1,31 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {Config, createConfigState, registerSettings} from '../src/settings.mjs';
-import {FIELD_SPECS, DEFAULTS, fieldValueError} from '../src/settings-spec.mjs';
+import {FIELD_SPECS, DEFAULTS, fieldValueError, parseFieldInput} from '../src/settings-spec.mjs';
+
+test('all numeric settings round-trip defaults and bounds and reject invalid input', () => {
+  for (const field of FIELD_SPECS.filter(field => field.type === 'number')) {
+    for (const value of [field.min, field.defaultValue, field.max]) {
+      const parsed = parseFieldInput(field, String(value / field.scale));
+      assert.equal(parsed, value, field.key);
+      assert.equal(fieldValueError(field, parsed), null, field.key);
+      assert.equal(Config({[field.key]:parsed})[field.key].get(), value);
+    }
+    for (const input of ['', ' ', 'NaN', 'Infinity', 'invalid', String((field.min - 1) / field.scale), String((field.max + 1) / field.scale)]) {
+      assert.ok(fieldValueError(field, parseFieldInput(field, input)), `${field.key}: ${input}`);
+    }
+    if (field.scale === 1) assert.ok(fieldValueError(field, parseFieldInput(field, '1.5')));
+    else {
+      const parsed = parseFieldInput(field, '1.23456789');
+      assert.equal(parsed, Math.round(1.23456789 * field.scale));
+      assert.equal(fieldValueError(field, parsed), null);
+      assert.ok(fieldValueError(field, parseFieldInput(field, String((field.min - 0.1) / field.scale))));
+      assert.ok(fieldValueError(field, parseFieldInput(field, String((field.max + 0.1) / field.scale))));
+    }
+  }
+  const timeout = FIELD_SPECS.find(field => field.key === 'guardTimeoutMs');
+  assert.match(fieldValueError(timeout, NaN), /1 秒–30 分钟/);
+});
 
 test('official Config exposes only editable fields as volatile and validates defaults and bounds', () => {
   const parsed = Config({});

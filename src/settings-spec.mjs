@@ -35,9 +35,18 @@ export const FIELD_SPECS = Object.freeze([
 
 export const DEFAULTS = Object.freeze(Object.fromEntries(FIELD_SPECS.map(field => [field.key, field.defaultValue])));
 
+// Time inputs use human units; persist them at the schema's millisecond precision.
+export function parseFieldInput(field, input) {
+  const scaled = input.trim() === '' ? NaN : Number(input) * field.scale;
+  if (field.scale === 1 || !Number.isFinite(scaled) || scaled < field.min || scaled > field.max) return scaled;
+  return Math.round(scaled);
+}
+
 export function fieldValueError(field, value) {
   if (field.type === 'boolean') return typeof value === 'boolean' ? null : '请选择开或关。';
   if (!Number.isSafeInteger(value) || value < field.min || value > field.max)
-    return `请输入 ${field.min / field.scale}–${field.max / field.scale} ${field.unit}范围内的有效数值。`;
+    return field.scale === 60000
+      ? `请输入 ${field.min / 1000} 秒–${field.max / field.scale} 分钟范围内的有效数值（以分钟输入，可填小数）。`
+      : `请输入 ${field.min / field.scale}–${field.max / field.scale} ${field.unit}范围内的有效${field.scale === 1 ? '整数' : '数值'}。`;
   return null;
 }
